@@ -1,0 +1,14 @@
+/* ModelMeter styles */
+:root {
+  --bubble-size: 40px;
+  --bubble-bg-light: #ffffff;
+  --bubble-bg-dark: #202123;
+  --bubble-text-light: #202123;
+  --bubble-text-dark: #ffffff;
+  --bubble-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  --border-radius: 20px;
+  --transition-speed: 100ms;
+  --panel-width: 250px;
+}
+
+/* Theme detection will be handled dynamically in JavaScript */ 

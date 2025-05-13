@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "ModelMeter",
+  "version": "0.1.0",
+  "description": "Counts your ChatGPT messages per model and displays usage.",
+  "permissions": [
+    "storage", 
+    "alarms", 
+    "scripting", 
+    "tabs"
+  ],
+  "host_permissions": ["https://chatgpt.com/*"],
+  "action": {
+    "default_icon": {
+      "16": "assets/icon16.png",
+      "48": "assets/icon48.png",
+      "128": "assets/icon128.png"
+    },
+    "default_popup": "popup.html"
+  },
+  "icons": {
+    "16": "assets/icon16.png",
+    "48": "assets/icon48.png",
+    "128": "assets/icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["style.css", "timestamp_utils.js", "storage_utils.js"],
+      "matches": ["https://chatgpt.com/*"]
+    }
+  ]
+} 
