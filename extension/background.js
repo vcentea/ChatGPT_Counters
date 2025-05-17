@@ -14,7 +14,7 @@ const {
 } = StorageUtils;
 
 // Import timestamp calculation utilities
-import { getModelLimits, findLimitObjectForModel, calculateNextTimestampAfterPeriod, updateFutureModelTimestamps } from './timestamp_utils.js';
+import { getModelLimits, findLimitObjectForModel, calculateNextTimestampAfterPeriod, updateFutureModelTimestamps, parseWarningTimestamps } from './timestamp_utils.js';
 
 console.log('ModelMeter Background: storage_utils.js and timestamp_utils.js imported as modules');
 
@@ -25,7 +25,6 @@ const DEBUG_API_LOGGING = true; // Set to false in production
 // --- Initialization ---
 chrome.runtime.onInstalled.addListener(() => {
   console.log('ModelMeter Background Debug: 🚀 Extension installed/updated.');
-  setupMidnightReset();
   
   // Initialize modelData in storage if it doesn't exist
   getModelDataFromStorage().then(data => {
@@ -172,10 +171,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // NEW function to handle rate limit hits based on banner detection
 async function handleRateLimitHit(message) {
-  const { modelSlug, newSinceTimestampFromBanner, resetCounter } = message;
-  console.log(`ModelMeter Background: Processing rateLimitHit for ${modelSlug}. New 'Start' from banner: ${new Date(newSinceTimestampFromBanner).toLocaleString()}`);
+  const { modelSlug, newSinceTimestampFromBanner, resetCounter, warningText } = message;
+  console.log(`ModelMeter Background: Processing rateLimitHit for ${modelSlug}.`);
 
-  if (!modelSlug || typeof newSinceTimestampFromBanner !== 'number') {
+  if (!modelSlug) {
     console.error('ModelMeter Background: Invalid data for handleRateLimitHit', message);
     throw new Error('Invalid data received for rate limit hit.');
   }
@@ -186,11 +185,35 @@ async function handleRateLimitHit(message) {
   const modelLowerCase = modelSlug.toLowerCase();
   const limitObject = findLimitObjectForModel(modelSlug, modelLowerCase, modelLimits);
 
+  let newSinceTimestamp = newSinceTimestampFromBanner;
   let newUntilTimestamp = null;
-  if (limitObject) {
-    newUntilTimestamp = calculateNextTimestampAfterPeriod(newSinceTimestampFromBanner, limitObject);
-    console.log(`ModelMeter Background: Calculated new 'Until' for ${modelSlug}: ${newUntilTimestamp ? new Date(newUntilTimestamp).toLocaleString() : 'N/A (unlimited/none)'}`);
-  } else {
+
+  // Handle o3 warning banners with future reset dates
+  if (warningText && modelLowerCase.includes('o3') && limitObject && limitObject.periodUnit === 'week') {
+    console.log(`ModelMeter Background: Processing o3 warning banner text: "${warningText}"`);
+    
+    const timestamps = parseWarningTimestamps(warningText, modelSlug, limitObject);
+    
+    if (timestamps.sinceTimestamp && timestamps.untilTimestamp) {
+      newSinceTimestamp = timestamps.sinceTimestamp;
+      newUntilTimestamp = timestamps.untilTimestamp;
+      console.log(`ModelMeter Background: Parsed o3 warning banner. New 'Start': ${new Date(newSinceTimestamp).toLocaleString()}, 'Until': ${new Date(newUntilTimestamp).toLocaleString()}`);
+    }
+  }
+  
+  // If we don't have a valid "since" timestamp or couldn't parse one from the warning banner,
+  // use the provided one from the regular banner (if available) or the current time
+  if (!newSinceTimestamp) {
+    newSinceTimestamp = newSinceTimestampFromBanner || new Date().getTime();
+    console.log(`ModelMeter Background: Using fallback 'Start' for ${modelSlug}: ${new Date(newSinceTimestamp).toLocaleString()}`);
+  }
+
+  // If we don't have a valid "until" timestamp from the warning banner parsing,
+  // calculate it based on the model's period
+  if (!newUntilTimestamp && limitObject) {
+    newUntilTimestamp = calculateNextTimestampAfterPeriod(newSinceTimestamp, limitObject);
+    console.log(`ModelMeter Background: Calculated 'Until' for ${modelSlug}: ${newUntilTimestamp ? new Date(newUntilTimestamp).toLocaleString() : 'N/A (unlimited/none)'}`);
+  } else if (!newUntilTimestamp) {
     console.warn(`ModelMeter Background: No limitObject found for ${modelSlug} to calculate 'Until'. 'Until' will be null.`);
   }
   
@@ -203,9 +226,9 @@ async function handleRateLimitHit(message) {
   if (resetCounter) {
     modelData[modelSlug].count = 0;
   }
-  modelData[modelSlug].lastResetTimestamp = newSinceTimestampFromBanner; // This is the new 'Start'
-  modelData[modelSlug].nextResetTime = newUntilTimestamp;           // This is the new 'Until'
-  modelData[modelSlug].limitResetTime = newUntilTimestamp;          // Keep consistent
+  modelData[modelSlug].lastResetTimestamp = newSinceTimestamp; // This is the new 'Start'
+  modelData[modelSlug].nextResetTime = newUntilTimestamp;      // This is the new 'Until'
+  modelData[modelSlug].limitResetTime = newUntilTimestamp;     // Keep consistent
   
   console.log(`ModelMeter Background: Updated ${modelSlug} - Start: ${new Date(modelData[modelSlug].lastResetTimestamp).toLocaleString()}, Until: ${newUntilTimestamp ? new Date(newUntilTimestamp).toLocaleString() : 'N/A'}, Count: ${modelData[modelSlug].count}`);
   
@@ -255,55 +278,6 @@ async function handleSingleModelReset(message) {
   await saveModelDataToStorage(modelData);
   console.log(`ModelMeter Background: Saved updated model data for ${modelFullName} after single reset.`);
 }
-
-// --- Alarm Management (Daily Reset) ---
-const DAILY_RESET_ALARM_NAME = 'dailyModelMeterReset';
-
-function setupMidnightReset() {
-  const now = new Date();
-  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
-  const msUntilMidnight = midnight.getTime() - now.getTime();
-
-  chrome.alarms.get(DAILY_RESET_ALARM_NAME, (existingAlarm) => {
-    if (existingAlarm) {
-        console.log('ModelMeter Background: Daily reset alarm already exists.');
-    } else {
-        chrome.alarms.create(DAILY_RESET_ALARM_NAME, {
-            when: Date.now() + msUntilMidnight,
-            periodInMinutes: 24 * 60 
-        });
-        console.log(`ModelMeter Background: Scheduled daily reset for ${midnight.toLocaleString()}`);
-    }
-  });
-}
-
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === DAILY_RESET_ALARM_NAME) {
-    console.log('ModelMeter Background: Daily reset alarm triggered.');
-    resetAllCountersInStorage().then(() => {
-        // Run timestamp update check after daily reset
-        updateFutureModelTimestamps()
-          .then(updatesCount => {
-            console.log(`ModelMeter Background: Updated timestamps for ${updatesCount} models during daily reset`);
-          })
-          .catch(error => {
-            console.error('ModelMeter Background: Error updating timestamps during daily reset:', error);
-          });
-
-        // Notify popup to refresh its display after daily reset
-        chrome.runtime.sendMessage({ action: 'countersDisplayShouldRefresh' }).catch(e => { /* ignore if popup not open */ });
-        // Also notify content script for in-page UI refresh if open
-        chrome.tabs.query({url: "*://chatgpt.com/*"}, (tabs) => {
-          tabs.forEach(tab => {
-            if (tab.id) {
-              sendMessageToTabWithRetries(tab.id, {action: 'countersDisplayShouldRefresh'}, 3);
-            }
-          });
-        });
-        console.log('ModelMeter Background: Daily reset complete, UI refresh messages sent.');
-    });
-  }
-});
 
 // Helper to send messages to tabs with retries (useful if content script isn't ready immediately)
 function sendMessageToTabWithRetries(tabId, message, retriesLeft) {

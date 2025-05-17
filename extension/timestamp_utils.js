@@ -233,5 +233,57 @@ export function getModelLimits(currentPlan) {
   return {};
 }
 
+/**
+ * Parses a future date from a warning banner text and calculates the "since" date
+ * For o3 model warnings, this calculates the "since" date as 7 days before the "until" date at 00:00
+ * 
+ * @param {string} warningText - The text from the warning banner
+ * @param {string} modelSlug - The model identifier
+ * @param {Object} limitObject - The limit object for the model
+ * @returns {Object} Object with sinceTimestamp and untilTimestamp
+ */
+export function parseWarningTimestamps(warningText, modelSlug, limitObject) {
+  const result = {
+    sinceTimestamp: null,
+    untilTimestamp: null
+  };
+  
+  if (!warningText || !modelSlug) {
+    console.warn('ModelMeter: Invalid input for parseWarningTimestamps');
+    return result;
+  }
+  
+  // For o3 models with weekly reset
+  if (modelSlug.toLowerCase().includes('o3') && limitObject && limitObject.periodUnit === 'week') {
+    // Extract the date from text like "until it resets May 19, 2025"
+    const dateMatch = warningText.match(/until it resets\s+([A-Za-z]+\s+\d+,\s+\d{4})/i);
+    
+    if (dateMatch && dateMatch[1]) {
+      try {
+        // Parse the "until" date (e.g., "May 19, 2025")
+        const untilDate = new Date(dateMatch[1]);
+        
+        if (!isNaN(untilDate.getTime())) {
+          // Set time to 23:59:59 for the "until" date
+          untilDate.setHours(23, 59, 59, 999);
+          result.untilTimestamp = untilDate.getTime();
+          
+          // Calculate "since" date as 7 days before at 00:00:00
+          const sinceDate = new Date(untilDate);
+          sinceDate.setDate(sinceDate.getDate() - 7);
+          sinceDate.setHours(0, 0, 0, 0);
+          result.sinceTimestamp = sinceDate.getTime();
+          
+          console.log(`ModelMeter: Parsed warning for ${modelSlug}. Since: ${new Date(result.sinceTimestamp).toLocaleString()}, Until: ${new Date(result.untilTimestamp).toLocaleString()}`);
+        }
+      } catch (error) {
+        console.error('ModelMeter: Error parsing date from warning:', error);
+      }
+    }
+  }
+  
+  return result;
+}
+
 // Export the function for use in other files
 // window.updateFutureModelTimestamps = updateFutureModelTimestamps; 

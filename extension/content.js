@@ -708,7 +708,7 @@ async function updateInPagePanelData() {
               // Set model limits based on the plan with structured data
      if (currentPlan === 'FREE') {
        modelLimits = {
-          'gpt-4o': { count: 15, periodAmount: 3, periodUnit: 'hour', displayText: '~15 per 3h' },
+          'gpt-4o': { count: 10, periodAmount: 2, periodUnit: 'hour', displayText: '~15 per 3h' },
           'gpt-4o-mini': { count: Infinity, periodAmount: 0, periodUnit: 'unlimited', displayText: 'Unlimited' },
           'o3-mini': { count: 0, periodAmount: 0, periodUnit: 'none', displayText: '0' },
           'o4-mini': { count: 20, periodAmount: 5, periodUnit: 'hour', displayText: '~20 per 5h' },
@@ -720,10 +720,10 @@ async function updateInPagePanelData() {
        modelLimits = {
           'gpt-4': { count: 40, periodAmount: 3, periodUnit: 'hour', displayText: '40 per 3h' },
           'gpt-4o': { count: 80, periodAmount: 3, periodUnit: 'hour', displayText: '80 per 3h' },
-          'o3': { count: 50, periodAmount: 1, periodUnit: 'week', displayText: '50 per week' },
+          'o3': { count: 100, periodAmount: 1, periodUnit: 'week', displayText: '50 per week' },
           'o3-mini': { count: 50, periodAmount: 1, periodUnit: 'week', displayText: '50 per week' },
-          'o4-mini': { count: 150, periodAmount: 1, periodUnit: 'day', displayText: '150 per day' },
-          'o4-mini-high': { count: 50, periodAmount: 1, periodUnit: 'day', displayText: '50 per day' },
+          'o4-mini': { count: 300, periodAmount: 1, periodUnit: 'day', displayText: '150 per day' },
+          'o4-mini-high': { count: 100, periodAmount: 1, periodUnit: 'day', displayText: '50 per day' },
           'deep-research': { count: 10, periodAmount: 1, periodUnit: 'month', displayText: '10 per month' },
           'dall-e-3': { count: 40, periodAmount: 3, periodUnit: 'hour', displayText: '40 per 3h' }
        };
@@ -1423,7 +1423,7 @@ function checkAndParseRateLimitBanner() {
         const titleElement = bannerNode.querySelector('.font-bold, div[class*="font-bold"], div[class*="text-token-text-primary"]');
         const titleText = titleElement ? titleElement.textContent.trim() : '';
         
-        // Check if this looks like a rate limit message
+        // Check if this looks like a rate limit message or warning
         const bannerTextLower = bannerText.toLowerCase();
         const isRateLimit = 
           (bannerTextLower.includes("hit the") && bannerTextLower.includes("limit")) ||
@@ -1432,35 +1432,50 @@ function checkAndParseRateLimitBanner() {
           bannerTextLower.includes("usage cap") ||
           bannerTextLower.includes("usage limit");
         
-        if (!isRateLimit) {
-          continue; // Not a rate limit banner, skip to next element
+        // Check if this is a warning banner (not a limit reached banner)
+        const isWarningBanner = 
+          (bannerTextLower.includes("remaining") || bannerTextLower.includes("left")) &&
+          (bannerTextLower.includes("responses") || bannerTextLower.includes("resets"));
+        
+        if (!isRateLimit && !isWarningBanner) {
+          continue; // Not a rate limit or warning banner, skip to next element
         }
         
-        // We found what looks like a rate limit banner
+        // We found what looks like a rate limit banner or warning
         bannerFound = true;
-        console.log('ModelMeter Debug (Banner Check): 🎯 Rate Limit Banner Found:', titleText || bannerText.substring(0, 50));
+        console.log('ModelMeter Debug (Banner Check): 🎯 Rate Limit or Warning Banner Found:', titleText || bannerText.substring(0, 50));
         
         // Parse the banner to extract model and reset time
         const parsedInfo = parseRateLimitBanner(bannerNode, titleText, bannerText);
         
-        if (parsedInfo && parsedInfo.modelSlug && parsedInfo.resetTimestamp) {
+        if (parsedInfo && parsedInfo.modelSlug) {
           console.log('ModelMeter Debug (Banner Check): ✅ Successfully parsed banner:', parsedInfo);
           
           // Normalize the model slug to match our naming convention
           const normalizedModelSlug = normalizeModelName(parsedInfo.modelSlug);
           const bannerStatedResetTime = parsedInfo.resetTimestamp; // This is the time stated in the banner
+          const isWarning = parsedInfo.isWarningBanner || false;
+          const warningText = parsedInfo.warningText || null;
 
-          // Send this bannerStatedResetTime to the background script.
-          // The background script will use this as the new 'lastResetTimestamp' (Start)
-          // and calculate the new 'nextResetTime' (Until) from it.
-          console.log(`ModelMeter Debug (Banner Check): 📤 Sending rate limit info to background. Model: ${normalizedModelSlug}, Banner Stated Reset Time (to be new Start): ${new Date(bannerStatedResetTime).toLocaleString()}`);
-          chrome.runtime.sendMessage({
+          // Prepare the message to send to the background script
+          const message = {
             action: 'rateLimitHit',
             modelSlug: normalizedModelSlug,
             newSinceTimestampFromBanner: bannerStatedResetTime, // User wants this as the new 'Start'
             storeResetTime: true, // Signal to background to calculate 'Until' and store both
-            resetCounter: true    // To reset the usage count
-          }).then(response => {
+            resetCounter: !isWarning // Only reset the counter for actual limit hit banners, not warnings
+          };
+          
+          // For o3 warning banners, include the full warning text for further parsing
+          if (isWarning && warningText && normalizedModelSlug.toLowerCase().includes('o3')) {
+            message.warningText = warningText;
+            console.log(`ModelMeter Debug (Banner Check): 📨 Sending o3 warning banner text to background script`);
+          }
+          
+          console.log(`ModelMeter Debug (Banner Check): 📤 Sending rate limit info to background. Model: ${normalizedModelSlug}, Banner Stated Reset Time: ${bannerStatedResetTime ? new Date(bannerStatedResetTime).toLocaleString() : 'None'}, Is Warning: ${isWarning}`);
+          
+          // Send message to background script
+          chrome.runtime.sendMessage(message).then(response => {
             console.log(`ModelMeter Debug (Banner Check): ✅ Rate limit info sent, response:`, response);
             
             // Update UI to reflect changes
@@ -1497,11 +1512,18 @@ function parseRateLimitBanner(bannerNode, titleText, bannerText) {
   try {
     let modelSlug = '';
     let resetTimestamp = null;
+    let isWarningBanner = false;
     
     // First try to extract model name from the title or banner text
     if (titleText) {
       // Check for model names in title text
       const titleLower = titleText.toLowerCase();
+      
+      // Check if this is a warning banner (not a limit reached banner)
+      if (titleLower.includes('remaining') || titleLower.includes('left')) {
+        isWarningBanner = true;
+      }
+      
       if (titleLower.includes('gpt-4') || titleLower.includes('gpt4')) {
         if (titleLower.includes('o') || titleLower.includes('0')) {
           if (titleLower.includes('mini')) {
@@ -1528,6 +1550,12 @@ function parseRateLimitBanner(bannerNode, titleText, bannerText) {
     // If no model found in title, try the full banner text
     if (!modelSlug) {
       const bannerLower = bannerText.toLowerCase();
+      
+      // Check if this is a warning banner (not a limit reached banner)
+      if (bannerLower.includes('remaining') || bannerLower.includes('left')) {
+        isWarningBanner = true;
+      }
+      
       if (bannerLower.includes('gpt-4o-mini') || bannerLower.includes('gpt4o mini')) {
         modelSlug = 'gpt-4o-mini';
       } else if (bannerLower.includes('gpt-4o') || bannerLower.includes('gpt4o')) {
@@ -1547,6 +1575,33 @@ function parseRateLimitBanner(bannerNode, titleText, bannerText) {
     
     // Now extract the reset time from the banner text
     const fullTextForTimeParsing = bannerText; // Keep original case for AM/PM if needed, though regex is case-insensitive
+    
+    // First check for future reset date in warning banners (specifically for o3)
+    // Example: "If you hit the limit, responses will switch to another model until it resets May 19, 2025."
+    if (isWarningBanner && modelSlug && modelSlug.toLowerCase().includes('o3')) {
+      const futureResetDateMatch = fullTextForTimeParsing.match(/until it resets\s+([A-Za-z]+\s+\d+,\s+\d{4})/i);
+      
+      if (futureResetDateMatch && futureResetDateMatch[1]) {
+        try {
+          const futureDate = new Date(futureResetDateMatch[1]);
+          if (!isNaN(futureDate.getTime())) {
+            // For o3 warning banners, we'll let the background script handle the calculation
+            // of "since" and "until" timestamps based on the parsed date
+            resetTimestamp = futureDate.getTime();
+            console.log(`ModelMeter Debug (Banner Parse): Parsed future o3 reset date: ${new Date(resetTimestamp).toLocaleString()}`);
+            
+            return {
+              modelSlug,
+              resetTimestamp,
+              isWarningBanner: true,
+              warningText: fullTextForTimeParsing // Include the full warning text for further parsing in background
+            };
+          }
+        } catch (error) {
+          console.error('ModelMeter Debug (Banner Parse): ❌ Error parsing future reset date:', error);
+        }
+      }
+    }
     
     // Attempt to parse absolute time first (e.g., "4:28 PM")
     const absoluteTimeMatch = fullTextForTimeParsing.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
