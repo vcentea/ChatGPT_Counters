@@ -1,7 +1,11 @@
 // ModelMeter - background.js
 
-// Import utilities
-import * as StorageUtils from './storage_utils.js';
+importScripts('storage_utils.js'); 
+importScripts('timestamp_utils.js');
+
+console.log('ModelMeter Background: Utility scripts imported via importScripts');
+
+// Access utilities from the global scope (self)
 const { 
   getModelDataFromStorage, 
   saveModelDataToStorage, 
@@ -10,13 +14,15 @@ const {
   resetAllCountersInStorage,
   getUserPlanFromStorage,
   saveUserPlanToStorage
-  // resetSingleModelCounterInStorage is handled by the new handleRateLimit logic
-} = StorageUtils;
+} = self.StorageUtils;
 
-// Import timestamp calculation utilities
-import { getModelLimits, findLimitObjectForModel, calculateNextTimestampAfterPeriod, updateFutureModelTimestamps, parseWarningTimestamps } from './timestamp_utils.js';
-
-console.log('ModelMeter Background: storage_utils.js and timestamp_utils.js imported as modules');
+const { 
+  getModelLimits, 
+  findLimitObjectForModel, 
+  calculateNextTimestampAfterPeriod, 
+  updateFutureModelTimestamps, 
+  parseWarningTimestamps 
+} = self.ModelMeterUtils;
 
 // --- Constants ---
 const API_ENDPOINT = 'https://chatgpt.com/backend-api/f/conversation';
@@ -31,19 +37,20 @@ chrome.runtime.onInstalled.addListener(() => {
     if (Object.keys(data).length === 0) {
       saveModelDataToStorage({}); // Ensures the key exists with an empty object
       console.log('ModelMeter Background Debug: 📋 Initialized empty modelData in storage.');
-      
-      // Run a diagnostic test for storage operations
-      // testStorageOperations(); // Disabled for now, can be re-enabled if needed
     } else {
       console.log('ModelMeter Background Debug: 📊 Current model data:', data);
       // Update future model timestamps on startup
-      updateFutureModelTimestamps()
-        .then(updatesCount => {
-          console.log(`ModelMeter Background Debug: Updated timestamps for ${updatesCount} models on startup`);
-        })
-        .catch(error => {
-          console.error('ModelMeter Background Debug: Error updating timestamps on startup:', error);
-        });
+      if (typeof updateFutureModelTimestamps === 'function') {
+        updateFutureModelTimestamps()
+          .then(updatesCount => {
+            console.log(`ModelMeter Background Debug: Updated timestamps for ${updatesCount} models on startup`);
+          })
+          .catch(error => {
+            console.error('ModelMeter Background Debug: Error updating timestamps on startup:', error);
+          });
+      } else {
+        console.error('ModelMeter Background Debug: updateFutureModelTimestamps is not available on startup.');
+      }
     }
   });
 });
@@ -74,6 +81,22 @@ async function testStorageOperations() {
 // --- Message Handling ---
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('ModelMeter Background Debug: 📨 Message received:', message);
+  
+  // --- Handle Ping (Context Validity Check) ---
+  if (message.action === 'ping') {
+    sendResponse({ status: 'success', message: 'Background script is responsive' });
+    return true;
+  }
+  
+  // --- Handle Health Check ---
+  if (message.action === 'healthCheck') {
+    sendResponse({ 
+      status: 'success', 
+      message: 'ModelMeter background script is healthy',
+      timestamp: Date.now()
+    });
+    return true;
+  }
   
   // --- Handle API Request Detection ---
   if (message.action === 'apiRequestDetected' && message.modelData) {
@@ -163,11 +186,106 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     return true; // Indicates async response
   }
+  
+  // --- Handle Reset All Counters ---
+  if (message.action === 'resetAllCounters') {
+    resetAllCountersInStorage()
+      .then(() => {
+        sendResponse({ status: 'success', message: 'All counters reset.' });
+        // Notify UI to refresh
+        chrome.runtime.sendMessage({ action: 'countersDisplayShouldRefresh' }).catch(e => { /* ignore */ });
+      })
+      .catch(error => {
+        console.error('ModelMeter Background Debug: 💥 Error resetting all counters:', error);
+        sendResponse({ status: 'error', message: `Error resetting all counters: ${error.message}` });
+      });
+    return true; // Indicates async response
+  }
+  
+  // --- Handle Model Configuration Update (NEW) ---
+  if (message.action === 'updateModelConfig') {
+    handleModelConfigUpdate(message)
+      .then(() => sendResponse({ status: 'success', message: `Configuration for ${message.modelName} updated.` }))
+      .catch(error => {
+        console.error(`ModelMeter Background Debug: 💥 Error updating configuration for ${message.modelName}:`, error);
+        sendResponse({ status: 'error', message: `Error updating configuration: ${error.message}` });
+      });
+    return true; // Indicates async response
+  }
 
-  // Default response if no action matched
-  // sendResponse({ status: 'error', message: 'Unknown action' });
-  return false; // Let other listeners have a chance if action not recognized
+  // Default response for unhandled message types
+  sendResponse({ status: 'error', message: 'Unhandled message type' });
+  return false;
 });
+
+// NEW function to handle model configuration updates
+async function handleModelConfigUpdate(message) {
+  const { modelName, count, untilTimestamp, userPlan } = message;
+  console.log(`ModelMeter Background: Processing configuration update for ${modelName}.`);
+
+  if (!modelName || isNaN(count) || isNaN(untilTimestamp)) {
+    console.error('ModelMeter Background: Invalid data for handleModelConfigUpdate', message);
+    throw new Error('Invalid data received for model configuration update.');
+  }
+
+  const modelData = await getModelDataFromStorage();
+  if (!modelData[modelName]) {
+    throw new Error(`Model ${modelName} not found in storage.`);
+  }
+
+  // Get model limits to calculate the lastResetTimestamp based on the new untilTimestamp
+  const modelLimits = getModelLimits(userPlan);
+  const modelLowerCase = modelName.toLowerCase();
+  const limitObject = findLimitObjectForModel(modelName, modelLowerCase, modelLimits);
+
+  // Update the count
+  modelData[modelName].count = count;
+  
+  // Update the until timestamp
+  modelData[modelName].nextResetTime = untilTimestamp;
+  modelData[modelName].limitResetTime = untilTimestamp; // Keep consistent
+  
+  // Calculate and update the since timestamp (lastResetTimestamp)
+  if (limitObject && limitObject.periodUnit !== 'unlimited' && limitObject.periodUnit !== 'none') {
+    // For models with a period, we need to back-calculate the since timestamp
+    // based on the until timestamp and the period
+    
+    // Create a date from the until timestamp
+    const untilDate = new Date(untilTimestamp);
+    
+    // Calculate the since timestamp by subtracting one period
+    let sinceDate = new Date(untilDate);
+    
+    switch(limitObject.periodUnit) {
+      case 'hour':
+        sinceDate.setHours(sinceDate.getHours() - limitObject.periodAmount);
+        break;
+      case 'day':
+        sinceDate.setDate(sinceDate.getDate() - limitObject.periodAmount);
+        break;
+      case 'week':
+        sinceDate.setDate(sinceDate.getDate() - (limitObject.periodAmount * 7));
+        break;
+      case 'month':
+        sinceDate.setMonth(sinceDate.getMonth() - limitObject.periodAmount);
+        break;
+      default:
+        // For unknown period units, log a warning and don't update the since timestamp
+        console.warn(`ModelMeter Background: Unknown periodUnit "${limitObject.periodUnit}" for model, using current lastResetTimestamp.`);
+    }
+    
+    modelData[modelName].lastResetTimestamp = sinceDate.getTime();
+    console.log(`ModelMeter Background: Calculated new 'Since' timestamp for ${modelName}: ${new Date(modelData[modelName].lastResetTimestamp).toLocaleString()}`);
+  } else {
+    // For unlimited/none models, just keep the current lastResetTimestamp
+    console.log(`ModelMeter Background: Model ${modelName} has no period or is unlimited. Keeping current 'Since' timestamp.`);
+  }
+  
+  console.log(`ModelMeter Background: Updated ${modelName} configuration - Count: ${modelData[modelName].count}, Since: ${new Date(modelData[modelName].lastResetTimestamp).toLocaleString()}, Until: ${new Date(modelData[modelName].nextResetTime).toLocaleString()}`);
+  
+  await saveModelDataToStorage(modelData);
+  console.log(`ModelMeter Background: Saved updated configuration for ${modelName}.`);
+}
 
 // NEW function to handle rate limit hits based on banner detection
 async function handleRateLimitHit(message) {

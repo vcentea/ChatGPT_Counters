@@ -21,6 +21,33 @@ function setupEventListeners() {
     updateConnectionStatus();
     updateCountersDisplay();
   });
+
+  // Add event listener for Reset All button
+  document.querySelector('#resetButton')?.addEventListener('click', function() {
+    if (confirm('Are you sure you want to reset all model counters?')) {
+      chrome.runtime.sendMessage({ action: 'resetAllCounters' }).then(response => {
+        if (response && response.status === 'success') {
+          updateStatus('All counters reset.', 'success');
+          updateCountersDisplay();
+        } else {
+          updateStatus('Failed to reset counters.', 'error');
+        }
+      }).catch(error => {
+        updateStatus('Error resetting counters.', 'error');
+        console.error('ModelMeter Popup: Error during reset all:', error);
+      });
+    }
+  });
+
+  // Configuration Modal event listeners
+  document.querySelector('#cancelConfig')?.addEventListener('click', function() {
+    hideConfigModal();
+  });
+
+  document.querySelector('#configForm')?.addEventListener('submit', function(event) {
+    event.preventDefault();
+    saveModelConfig();
+  });
 }
 
 function updateConnectionStatus() {
@@ -95,6 +122,15 @@ async function updateCountersDisplay() {
           hour: '2-digit', minute: '2-digit' 
         });
 
+        // Calculate expiration date (until) if available
+        let untilDateTime = '';
+        if (item.nextResetTime) {
+          untilDateTime = new Date(item.nextResetTime).toLocaleString(undefined, {
+            year: 'numeric', month: 'short', day: 'numeric',
+            hour: '2-digit', minute: '2-digit'
+          });
+        }
+
         // Display the raw model name directly
         const displayName = modelFullName; 
 
@@ -103,14 +139,23 @@ async function updateCountersDisplay() {
             <div class="model-info">
               <span class="model-name">${displayName}</span>
               <span class="reset-timestamp">Since: ${resetDateTime}</span>
+              ${untilDateTime ? `<span class="reset-timestamp">Until: ${untilDateTime}</span>` : ''}
             </div>
           </div>
           <div class="count-actions">
             <span class="count">${item.count}</span>
+            <button class="config-btn" data-model="${modelFullName}" title="Configure ${displayName}">Config</button>
             <button class="reset-single-btn" data-model="${modelFullName}" title="Reset count for ${displayName}">Reset</button>
           </div>
         `;
         countersElement.appendChild(countElement);
+
+        // Add event listener for config button
+        const configButton = countElement.querySelector('.config-btn');
+        configButton?.addEventListener('click', function() {
+          const modelToConfig = this.getAttribute('data-model');
+          showConfigModal(modelToConfig, modelData[modelToConfig]);
+        });
 
         const singleResetButton = countElement.querySelector('.reset-single-btn');
         singleResetButton?.addEventListener('click', async function() {
@@ -149,6 +194,81 @@ function updateStatus(message, type) {
   if (!statusElement) return;
   statusElement.textContent = message;
   statusElement.className = `status ${type || ''}`;
+}
+
+// Configuration Modal Functions
+function showConfigModal(modelName, modelData) {
+  console.log('ModelMeter Popup: Opening configuration for model:', modelName, modelData);
+  
+  // Set the model name in the hidden field
+  document.getElementById('configModelName').value = modelName;
+  
+  // Set the current count
+  document.getElementById('configCount').value = modelData.count || 0;
+  
+  // Set the expiration date (until) if available
+  const expireDate = modelData.nextResetTime ? new Date(modelData.nextResetTime) : new Date();
+  
+  // Format date to yyyy-MM-ddThh:mm
+  const formattedDate = expireDate.toISOString().slice(0, 16);
+  document.getElementById('configExpireDate').value = formattedDate;
+  
+  // Show the modal
+  document.getElementById('configModal').classList.add('visible');
+}
+
+function hideConfigModal() {
+  document.getElementById('configModal').classList.remove('visible');
+}
+
+async function saveModelConfig() {
+  const modelName = document.getElementById('configModelName').value;
+  const count = parseInt(document.getElementById('configCount').value);
+  const expireDate = new Date(document.getElementById('configExpireDate').value).getTime();
+  
+  if (!modelName || isNaN(count) || isNaN(expireDate)) {
+    updateStatus('Invalid configuration data.', 'error');
+    return;
+  }
+
+  try {
+    // Get current model data
+    const response = await chrome.runtime.sendMessage({ action: 'getModelData' });
+    if (!response || response.status !== 'success' || !response.data) {
+      updateStatus('Failed to get model data for configuration.', 'error');
+      return;
+    }
+
+    const modelData = response.data;
+    if (!modelData[modelName]) {
+      updateStatus(`Model ${modelName} not found.`, 'error');
+      return;
+    }
+
+    // Get model limit information to calculate the since date based on until date
+    const planResponse = await chrome.runtime.sendMessage({ action: 'getUserPlan' });
+    const userPlan = (planResponse && planResponse.status === 'success') ? planResponse.plan : 'FREE';
+    
+    // Request update with the new configuration
+    const updateResponse = await chrome.runtime.sendMessage({
+      action: 'updateModelConfig',
+      modelName: modelName,
+      count: count,
+      untilTimestamp: expireDate,
+      userPlan: userPlan
+    });
+
+    if (updateResponse && updateResponse.status === 'success') {
+      updateStatus(`Configuration for ${modelName} updated.`, 'success');
+      hideConfigModal();
+      updateCountersDisplay();
+    } else {
+      updateStatus(`Failed to update configuration for ${modelName}.`, 'error');
+    }
+  } catch (error) {
+    updateStatus(`Error saving configuration: ${error.message}`, 'error');
+    console.error('ModelMeter Popup: Error saving model configuration:', error);
+  }
 }
 
 // sendMessageToContentScript and injectContentScript are no longer needed here as background handles injection

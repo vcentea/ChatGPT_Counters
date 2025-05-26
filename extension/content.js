@@ -10,6 +10,8 @@ let processedMessageIds = new Set(); // Track processed message IDs to avoid dou
 let inPagePanel = null;
 let panelToggleButton = null; // This will be our existing bubbleElement
 let originalFetch = null; // To store the original fetch function
+let extensionContextValid = true; // Track extension context validity
+let reloadMessageShown = false; // Track if reload message is already shown
 
 // Constants
 const API_ENDPOINTS = [
@@ -20,6 +22,183 @@ const API_ENDPOINTS = [
 // Add the specific endpoint known to use SSE for conversation details
 const SSE_ENDPOINT_FRAGMENT = '/backend-api/conversation'; // More general check for SSE endpoint
 
+// Utility function to safely send messages to background script
+async function safeSendMessage(message, options = {}) {
+  const { suppressErrors = false, retries = 0 } = options;
+  
+  // If we know the context is invalid, don't even try
+  if (!extensionContextValid && !suppressErrors) {
+    console.log('ModelMeter Content: Extension context known to be invalid, skipping message');
+    showReloadPageMessage('Extension context invalidated. Please refresh the page to restore ModelMeter functionality.');
+    return null;
+  }
+  
+  try {
+    const response = await chrome.runtime.sendMessage(message);
+    return response;
+  } catch (error) {
+    if (error.message && error.message.includes('Extension context invalidated')) {
+      extensionContextValid = false;
+      if (!suppressErrors) {
+        handleExtensionContextError(`safeSendMessage-${message.action || 'unknown'}`);
+      }
+    } else if (error.message && error.message.includes('Could not establish connection')) {
+      extensionContextValid = false;
+      if (!suppressErrors) {
+        console.error('ModelMeter Content: Could not establish connection to background script');
+        showReloadPageMessage('ModelMeter cannot connect to background script. Please refresh the page to restore functionality.');
+        handleExtensionContextError(`safeSendMessage-connection-${message.action || 'unknown'}`);
+      }
+    } else {
+      console.error('ModelMeter Content: Error sending message to background:', error);
+    }
+    
+    // Retry logic for transient errors (but not for context invalidation)
+    if (retries > 0 && extensionContextValid) {
+      console.log(`ModelMeter Content: Retrying message send (${retries} retries left)`);
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      return safeSendMessage(message, { suppressErrors, retries: retries - 1 });
+    }
+    
+    return null;
+  }
+}
+
+// Function to show reload page message on the ChatGPT page
+function showReloadPageMessage(customMessage = null) {
+  // Prevent showing multiple reload messages
+  if (reloadMessageShown) {
+    return;
+  }
+  
+  try {
+    // Safety check - don't try to manipulate DOM if document.body doesn't exist
+    if (!document || !document.body) {
+      console.log('ModelMeter Content: document.body not available, cannot display reload message');
+      return;
+    }
+    
+    // Remove any existing reload messages to avoid duplicates
+    const existingMessages = document.querySelectorAll('.modelmeter-reload-message');
+    existingMessages.forEach(msg => {
+      try {
+        msg.remove();
+      } catch (e) {
+        // Silently ignore removal errors
+      }
+    });
+    
+    // Create a new reload message
+    const reloadDiv = document.createElement('div');
+    reloadDiv.className = 'modelmeter-reload-message';
+    reloadDiv.style.cssText = `
+      position: fixed;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      background-color: #fef3c7;
+      color: #92400e;
+      border: 1px solid #f59e0b;
+      border-radius: 8px;
+      padding: 12px 16px;
+      z-index: 10000;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      max-width: 500px;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+      text-align: center;
+    `;
+    
+    // Create close button
+    const closeButton = document.createElement('button');
+    closeButton.textContent = '×';
+    closeButton.style.cssText = `
+      position: absolute;
+      top: 5px;
+      right: 8px;
+      border: none;
+      background: none;
+      color: #92400e;
+      font-size: 18px;
+      cursor: pointer;
+      padding: 0;
+      margin: 0;
+      width: 20px;
+      height: 20px;
+      line-height: 18px;
+      text-align: center;
+      font-weight: bold;
+    `;
+    closeButton.onclick = function() {
+      try {
+        reloadDiv.remove();
+        reloadMessageShown = false;
+      } catch (e) {
+        // Silently ignore removal errors
+      }
+    };
+    
+    // Message content
+    const messageP = document.createElement('p');
+    messageP.textContent = customMessage || 'ModelMeter content script not responding. Please refresh the page to restore full functionality.';
+    messageP.style.margin = '0 0 10px 0';
+    messageP.style.paddingRight = '20px'; // Make room for close button
+    
+    // Refresh button
+    const refreshButton = document.createElement('button');
+    refreshButton.textContent = 'Refresh Page';
+    refreshButton.style.cssText = `
+      background-color: #f59e0b;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 16px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+      margin-top: 8px;
+      transition: background-color 0.2s;
+    `;
+    refreshButton.onmouseover = function() {
+      this.style.backgroundColor = '#d97706';
+    };
+    refreshButton.onmouseout = function() {
+      this.style.backgroundColor = '#f59e0b';
+    };
+    refreshButton.onclick = function() {
+      window.location.reload();
+    };
+    
+    // Build and append the reload message
+    reloadDiv.appendChild(closeButton);
+    reloadDiv.appendChild(messageP);
+    reloadDiv.appendChild(refreshButton);
+    
+    // Try to append to document body with error handling
+    try {
+      document.body.appendChild(reloadDiv);
+      reloadMessageShown = true;
+      
+      // Auto-hide after 30 seconds
+      setTimeout(() => {
+        try {
+          if (reloadDiv.parentNode) {
+            reloadDiv.remove();
+            reloadMessageShown = false;
+          }
+        } catch (e) {
+          // Silently ignore removal errors
+        }
+      }, 30000);
+      
+    } catch (error) {
+      console.error('ModelMeter Content: Failed to append reload message to document.body', error);
+    }
+  } catch (error) {
+    console.error('ModelMeter Content: Error creating reload message UI', error);
+  }
+}
+
 // Wait for DOM to be ready
 if (document.readyState === 'complete' || document.readyState === 'interactive') {
   initialize();
@@ -27,27 +206,74 @@ if (document.readyState === 'complete' || document.readyState === 'interactive')
   document.addEventListener('DOMContentLoaded', initialize);
 }
 
-// Ensure the timestamp_utils.js script is loaded
-function loadTimestampUtils() {
+// Ensure the timestamp_utils.js and storage_utils.js scripts are loaded
+function loadUtilScripts() {
   return new Promise((resolve, reject) => {
-    // Check if the function is already available
-    if (typeof window.updateFutureModelTimestamps === 'function') {
-      resolve();
-      return;
-    }
+    try {
+      // Check if the scripts are already loaded
+      if (window.ModelMeterUtils && window.StorageUtils) {
+        console.log('ModelMeter Content: Utils already loaded, continuing');
+        resolve();
+        return;
+      }
 
-    // Create script element to load the file
-    const script = document.createElement('script');
-    script.src = chrome.runtime.getURL('timestamp_utils.js');
-    script.onload = () => {
-      console.log('ModelMeter: Timestamp utils loaded successfully');
-      resolve();
-    };
-    script.onerror = (error) => {
-      console.error('ModelMeter: Failed to load timestamp utils', error);
+      // Safety check - if document.head doesn't exist, we wait and retry
+      if (!document || !document.head) {
+        console.log('ModelMeter Content: document.head not available yet, waiting...');
+        setTimeout(() => {
+          loadUtilScripts().then(resolve).catch(reject);
+        }, 200);
+        return;
+      }
+
+      // Load scripts one after another
+      loadScript('timestamp_utils.js')
+        .then(() => loadScript('storage_utils.js'))
+        .then(() => {
+          console.log('ModelMeter Content: Both utility scripts loaded successfully');
+          resolve();
+        })
+        .catch(reject);
+    } catch (error) {
+      console.error('ModelMeter Content: Error in loadUtilScripts', error);
       reject(error);
-    };
-    document.head.appendChild(script);
+    }
+  });
+}
+
+// Helper function to load a single script
+function loadScript(scriptName) {
+  return new Promise((resolve, reject) => {
+    try {
+      // Create script element
+      const script = document.createElement('script');
+      script.src = chrome.runtime.getURL(scriptName);
+      script.async = true;
+      
+      script.onload = () => {
+        console.log(`ModelMeter Content: Successfully loaded ${scriptName}`);
+        resolve();
+      };
+      
+      script.onerror = (error) => {
+        console.error(`ModelMeter Content: Failed to load ${scriptName}`, error);
+        reject(error);
+      };
+      
+      // Try-catch for appending
+      try {
+        document.head.appendChild(script);
+      } catch (error) {
+        console.error(`ModelMeter Content: Error appending ${scriptName} to document.head`, error);
+        if (error.message && error.message.includes('Extension context invalidated')) {
+          handleExtensionContextError(`loadScript-${scriptName}`);
+        }
+        reject(error);
+      }
+    } catch (error) {
+      console.error(`ModelMeter Content: Error setting up ${scriptName}`, error);
+      reject(error);
+    }
   });
 }
 
@@ -59,8 +285,8 @@ async function initialize() {
   }
   
   try {
-    // Load timestamp utils first
-    await loadTimestampUtils();
+    // Load utility scripts first
+    await loadUtilScripts();
     
     // First create UI elements
     createTestElement();
@@ -91,11 +317,70 @@ async function initialize() {
       checkAndParseRateLimitBanner();
       checkAndResetExpiredModels();
       
-      // Set up regular checks for banners and expired models
+      // Set up multiple timer intervals for different purposes
+      
+      // 1. MAIN TIMER: Every 60 seconds - Full check (expiration, banners, health)
       setInterval(() => {
+        console.log('ModelMeter: Running 60-second comprehensive check...');
         checkAndParseRateLimitBanner();
         checkAndResetExpiredModels();
-      }, 60000); // Check every minute
+        performHealthCheck();
+        
+        // Always try to update UI, even if background communication fails
+        updateUI().catch(error => {
+          console.error('ModelMeter: UI update failed in 60s timer:', error);
+        });
+      }, 60000);
+      
+      // 2. BACKGROUND HEALTH TIMER: Every 30 seconds - Quick ping test
+      setInterval(() => {
+        console.log('ModelMeter: Running 30-second background health check...');
+        safeSendMessage({ action: 'ping' }, { suppressErrors: true }).then(response => {
+          if (!response) {
+            console.warn('ModelMeter: Background script not responding in 30s health check');
+            showReloadPageMessage('ModelMeter background script stopped responding. Please refresh the page to restore functionality.');
+          } else {
+            console.log('ModelMeter: Background script healthy in 30s check');
+          }
+        }).catch(error => {
+          console.error('ModelMeter: Background health check error:', error);
+          showReloadPageMessage('ModelMeter background script communication error. Please refresh the page to restore functionality.');
+        });
+      }, 30000);
+      
+      // 3. UI UPDATE TIMER: Every 15 seconds - Keep UI fresh
+      setInterval(() => {
+        console.log('ModelMeter: Running 15-second UI refresh...');
+        detectCurrentModel();
+        updateUI().catch(error => {
+          console.error('ModelMeter: UI refresh failed in 15s timer:', error);
+        });
+      }, 15000);
+      
+      // 4. CRITICAL EXPIRATION TIMER: Every 2 minutes - Independent expiration check
+      setInterval(() => {
+        console.log('ModelMeter: Running 2-minute critical expiration check...');
+        checkAndResetExpiredModels().catch(error => {
+          console.error('ModelMeter: Critical expiration check failed:', error);
+        });
+      }, 120000);
+      
+      // Perform initial health check after 5 seconds
+      setTimeout(() => {
+        performHealthCheck();
+      }, 5000);
+      
+      // Perform initial background health check after 10 seconds
+      setTimeout(() => {
+        safeSendMessage({ action: 'ping' }, { suppressErrors: true }).then(response => {
+          if (!response) {
+            console.warn('ModelMeter: Initial background script health check failed');
+            showReloadPageMessage('ModelMeter background script not responding on startup. Please refresh the page to restore functionality.');
+          } else {
+            console.log('ModelMeter: Initial background script health check passed');
+          }
+        });
+      }, 10000);
     }, 1000);
     
     console.log('ModelMeter Content: Initialized successfully');
@@ -104,6 +389,60 @@ async function initialize() {
     isModelMeterInitialized = false;
     if (error.message && error.message.includes('Extension context invalidated')) {
       handleExtensionContextError('initialize');
+    } else {
+      // Show reload message for initialization failures
+      showReloadPageMessage('ModelMeter failed to initialize properly. Please refresh the page to restore functionality.');
+    }
+  }
+}
+
+// Health check function to detect if extension is working properly
+async function performHealthCheck() {
+  try {
+    // Skip health checks if we already know context is invalid
+    if (!extensionContextValid) {
+      return;
+    }
+    
+    // Skip if reload message is already shown
+    if (reloadMessageShown) {
+      return;
+    }
+    
+    // Test if we can communicate with the background script
+    const healthResponse = await safeSendMessage({ action: 'healthCheck' }, { suppressErrors: true });
+    
+    if (!healthResponse) {
+      console.warn('ModelMeter Content: Health check failed - no response from background script');
+      showReloadPageMessage('ModelMeter appears to be disconnected. Please refresh the page to restore functionality.');
+      return;
+    }
+    
+    // Check if UI elements are still present and functional
+    if (isModelMeterInitialized && !bubbleElement) {
+      console.warn('ModelMeter Content: Health check failed - bubble element missing');
+      showReloadPageMessage('ModelMeter UI elements are missing. Please refresh the page to restore functionality.');
+      return;
+    }
+    
+    // Check if we can still access extension resources
+    try {
+      chrome.runtime.getURL('manifest.json');
+    } catch (error) {
+      console.warn('ModelMeter Content: Health check failed - cannot access extension resources');
+      extensionContextValid = false;
+      showReloadPageMessage('ModelMeter extension resources are inaccessible. Please refresh the page to restore functionality.');
+      return;
+    }
+    
+    console.log('ModelMeter Content: Health check passed');
+  } catch (error) {
+    console.error('ModelMeter Content: Health check error:', error);
+    if (error.message && error.message.includes('Extension context invalidated')) {
+      extensionContextValid = false;
+      handleExtensionContextError('healthCheck');
+    } else {
+      showReloadPageMessage('ModelMeter health check failed. Please refresh the page to restore functionality.');
     }
   }
 }
@@ -359,22 +698,20 @@ function setupPerformanceObserver() {
 // Helper function to send increment message to background
 function incrementCounterInBackground(modelSlug, messageId) {
    console.log(`ModelMeter Content: Sending increment request for model: ${modelSlug}, messageId: ${messageId}`);
-   chrome.runtime.sendMessage({
+   
+   safeSendMessage({
        action: 'incrementModelCount',
        modelFullName: modelSlug // background expects modelFullName
-   }).then(response => {
+   }, { suppressErrors: true }).then(response => {
        if (response && response.status === 'success') {
            console.log(`ModelMeter Content: Background confirmed increment for model: ${modelSlug}`);
            // Immediately update all UI components to keep in sync
            updateAllUIComponents();
        } else {
-           console.error(`ModelMeter Content: Background failed increment for ${modelSlug}`, response);
+           console.log(`ModelMeter Content: Background failed increment for ${modelSlug}`, response);
        }
    }).catch(err => {
        console.error(`ModelMeter Content: Error sending increment for ${modelSlug} to background:`, err);
-       if (err.message && err.message.includes('Extension context invalidated')) {
-           handleExtensionContextError('incrementCounterInBackground');
-       }
    });
 }
 
@@ -591,6 +928,9 @@ function createInPageUI() {
   document.body.appendChild(inPagePanel);
   console.log('ModelMeter Content: In-page panel UI created with plan selection labels');
 
+  // Create the configuration modal
+  createConfigModal();
+
   // --- NEW: Event Listeners for User Plan Labels ---
   const planLabelFree = inPagePanel.querySelector('#user-plan-label-free');
   const planLabelPlus = inPagePanel.querySelector('#user-plan-label-plus');
@@ -631,6 +971,246 @@ function createInPageUI() {
     });
   }
   // --- END NEW ---
+}
+
+// Create configuration modal for in-page usage
+function createConfigModal() {
+  if (document.getElementById('modelmeter-config-modal')) return;
+  
+  const configModal = document.createElement('div');
+  configModal.id = 'modelmeter-config-modal';
+  configModal.style.cssText = `
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0,0,0,0.5);
+    z-index: 2147483646;
+    display: none;
+    justify-content: center;
+    align-items: center;
+  `;
+  
+  configModal.innerHTML = `
+    <div class="config-modal-content" style="
+      background-color: white;
+      padding: 20px;
+      border-radius: 6px;
+      width: 90%;
+      max-width: 300px;
+      box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    ">
+      <div class="modal-title" style="
+        font-size: 16px;
+        font-weight: bold;
+        margin-bottom: 15px;
+        color: #333;
+      ">Configure Model</div>
+      <form id="inpage-config-form">
+        <input type="hidden" id="inpage-config-model-name" name="modelName">
+        <div class="form-group" style="margin-bottom: 15px;">
+          <label for="inpage-config-count" style="
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+            color: #333;
+          ">Message Count:</label>
+          <input type="number" id="inpage-config-count" name="count" min="0" required style="
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            color: #333;
+          ">
+        </div>
+        <div class="form-group" style="margin-bottom: 15px;">
+          <label for="inpage-config-expire-date" style="
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+            color: #333;
+          ">Expiration Date:</label>
+          <input type="datetime-local" id="inpage-config-expire-date" name="expireDate" required style="
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            color: #333;
+          ">
+        </div>
+        <div class="form-actions" style="
+          display: flex;
+          justify-content: space-between;
+          margin-top: 20px;
+        ">
+          <button type="button" id="inpage-cancel-config" style="
+            background: #6c757d;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: background 0.2s;
+          ">Cancel</button>
+          <button type="submit" id="inpage-save-config" style="
+            background: #28a745;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: background 0.2s;
+          ">Save</button>
+        </div>
+      </form>
+    </div>
+  `;
+  
+  document.body.appendChild(configModal);
+  
+  // Add event listeners for the modal
+  document.getElementById('inpage-cancel-config')?.addEventListener('click', function() {
+    hideConfigModal();
+  });
+  
+  document.getElementById('inpage-config-form')?.addEventListener('submit', function(event) {
+    event.preventDefault();
+    saveModelConfig();
+  });
+  
+  // Add keyboard support for ESC key to close the modal
+  document.addEventListener('keydown', function(event) {
+    if (event.key === 'Escape' || event.keyCode === 27) {
+      const configModal = document.getElementById('modelmeter-config-modal');
+      if (configModal && configModal.style.display === 'flex') {
+        console.log('ModelMeter Content: ESC key pressed, hiding config modal');
+        configModal.style.display = 'none';
+      }
+    }
+  });
+  
+  console.log('ModelMeter Content: Configuration modal created with keyboard support');
+
+  // Add CSS to ensure input icons are visible in config modal
+  const iconStyles = document.createElement('style');
+  iconStyles.type = 'text/css';
+  iconStyles.textContent = `
+    /* Darken spinner arrows and calendar icon in in-page config modal */
+    #modelmeter-config-modal input::-webkit-inner-spin-button,
+    #modelmeter-config-modal input::-webkit-outer-spin-button {
+      filter: invert(1) !important;
+    }
+    #modelmeter-config-modal input::-webkit-calendar-picker-indicator {
+      filter: invert(1) !important;
+    }
+  `;
+  document.head.appendChild(iconStyles);
+}
+
+// Show the configuration modal with model data
+function showConfigModal(modelName, modelData) {
+  console.log('ModelMeter Content: Opening configuration for model:', modelName, modelData);
+  
+  // Set the model name in the hidden field
+  document.getElementById('inpage-config-model-name').value = modelName;
+  
+  // Set the current count
+  document.getElementById('inpage-config-count').value = modelData.count || 0;
+  
+  // Use the existing expiration date (until) from model data - prefer nextResetTime, fallback to limitResetTime
+  let expireDate;
+  const existingResetTime = modelData.nextResetTime || modelData.limitResetTime;
+  
+  if (existingResetTime) {
+    expireDate = new Date(existingResetTime);
+    console.log(`ModelMeter Content: Using existing reset time for ${modelName}: ${expireDate.toISOString()}`);
+  } else {
+    // Only if no reset time exists at all, use a future date (1 day from now)
+    expireDate = new Date();
+    expireDate.setDate(expireDate.getDate() + 1);
+    console.log(`ModelMeter Content: No existing reset time for ${modelName}, defaulting to 1 day from now: ${expireDate.toISOString()}`);
+  }
+  
+  // Format date to yyyy-MM-ddThh:mm in LOCAL timezone (not UTC)
+  const year = expireDate.getFullYear();
+  const month = String(expireDate.getMonth() + 1).padStart(2, '0');
+  const day = String(expireDate.getDate()).padStart(2, '0');
+  const hours = String(expireDate.getHours()).padStart(2, '0');
+  const minutes = String(expireDate.getMinutes()).padStart(2, '0');
+  const formattedDate = `${year}-${month}-${day}T${hours}:${minutes}`;
+  
+  document.getElementById('inpage-config-expire-date').value = formattedDate;
+  
+  // Show the modal
+  const configModal = document.getElementById('modelmeter-config-modal');
+  if (configModal) {
+    configModal.style.display = 'flex';
+  }
+}
+
+// Hide the configuration modal
+function hideConfigModal() {
+  const configModal = document.getElementById('modelmeter-config-modal');
+  if (configModal) {
+    configModal.style.display = 'none';
+  }
+}
+
+// Save the model configuration
+async function saveModelConfig() {
+  const modelName = document.getElementById('inpage-config-model-name').value;
+  const count = parseInt(document.getElementById('inpage-config-count').value);
+  const expireDate = new Date(document.getElementById('inpage-config-expire-date').value).getTime();
+  
+  if (!modelName || isNaN(count) || isNaN(expireDate)) {
+    updateStatusInPanel('Invalid configuration data.', 'error', 'inpage-status');
+    return;
+  }
+
+  try {
+    // Get current model data
+    const response = await chrome.runtime.sendMessage({ action: 'getModelData' });
+    if (!response || response.status !== 'success' || !response.data) {
+      updateStatusInPanel('Failed to get model data for configuration.', 'error', 'inpage-status');
+      return;
+    }
+
+    const modelData = response.data;
+    if (!modelData[modelName]) {
+      updateStatusInPanel(`Model ${modelName} not found.`, 'error', 'inpage-status');
+      return;
+    }
+
+    // Get model limit information to calculate the since date based on until date
+    const planResponse = await chrome.runtime.sendMessage({ action: 'getUserPlan' });
+    const userPlan = (planResponse && planResponse.status === 'success') ? planResponse.plan : 'FREE';
+    
+    // Request update with the new configuration
+    const updateResponse = await chrome.runtime.sendMessage({
+      action: 'updateModelConfig',
+      modelName: modelName,
+      count: count,
+      untilTimestamp: expireDate,
+      userPlan: userPlan
+    });
+
+    if (updateResponse && updateResponse.status === 'success') {
+      updateStatusInPanel(`Configuration for ${modelName} updated.`, 'success', 'inpage-status');
+      hideConfigModal();
+      updateInPagePanelData();
+    } else {
+      updateStatusInPanel(`Failed to update configuration for ${modelName}.`, 'error', 'inpage-status');
+    }
+  } catch (error) {
+    updateStatusInPanel(`Error saving configuration: ${error.message}`, 'error', 'inpage-status');
+    console.error('ModelMeter Content: Error saving model configuration:', error);
+    if (error.message && error.message.includes('Extension context invalidated')) {
+      handleExtensionContextError('saveModelConfig');
+    }
+  }
 }
 
 // Make sure updatePlanLabelStyles and updateInPagePanelData are completely clean of any references
@@ -720,7 +1300,7 @@ async function updateInPagePanelData() {
        modelLimits = {
           'gpt-4': { count: 40, periodAmount: 3, periodUnit: 'hour', displayText: '40 per 3h' },
           'gpt-4o': { count: 80, periodAmount: 3, periodUnit: 'hour', displayText: '80 per 3h' },
-          'o3': { count: 100, periodAmount: 1, periodUnit: 'week', displayText: '50 per week' },
+          'o3': { count: 100, periodAmount: 1, periodUnit: 'week', displayText: '100 per week' },
           'o3-mini': { count: 50, periodAmount: 1, periodUnit: 'week', displayText: '50 per week' },
           'o4-mini': { count: 300, periodAmount: 1, periodUnit: 'day', displayText: '150 per day' },
           'o4-mini-high': { count: 100, periodAmount: 1, periodUnit: 'day', displayText: '50 per day' },
@@ -873,11 +1453,41 @@ async function updateInPagePanelData() {
               <span style="font-weight:bold;">${item.count} / ${limitText || '0'}</span>
               ${nextResetTime ? `<div style="font-size:9px; color:#777;">Until: ${nextResetTime} ${timeToReset}</div>` : ''}
             </div>
-            <div style="width:50px; text-align:right;">
+            <div style="width:80px; text-align:right;">
+            <button class="inpage-config-btn" data-model="${modelFullName}" style="padding:2px 5px; font-size:9px; background:#17a2b8; color:white; border:none; border-radius:3px; cursor:pointer; margin-right:3px;">Config</button>
             <button class="inpage-reset-single" data-model="${modelFullName}" style="padding:2px 5px; font-size:9px; background:#dc3545; color:white; border:none; border-radius:3px; cursor:pointer;">Reset</button>
           </div>
         `;
         countersEl.appendChild(itemDiv);
+        
+        // Add event listener for Config button
+        itemDiv.querySelector('.inpage-config-btn')?.addEventListener('click', async function() {
+          const modelToConfig = this.getAttribute('data-model');
+          try {
+            // Get current model data
+            const response = await chrome.runtime.sendMessage({ action: 'getModelData' });
+            if (!response || response.status !== 'success' || !response.data) {
+              updateStatusInPanel('Failed to get model data for configuration.', 'error', 'inpage-status');
+              return;
+            }
+            
+            const modelData = response.data;
+            if (!modelData[modelToConfig]) {
+              updateStatusInPanel(`Model ${modelToConfig} not found.`, 'error', 'inpage-status');
+              return;
+            }
+            
+            // Show configuration modal
+            showConfigModal(modelToConfig, modelData[modelToConfig]);
+          } catch (error) {
+            console.error('ModelMeter Content: Error opening config modal:', error);
+            updateStatusInPanel('Error opening configuration. Please try again.', 'error', 'inpage-status');
+            if (error.message && error.message.includes('Extension context invalidated')) {
+              handleExtensionContextError('configModelInPanel');
+            }
+          }
+        });
+        
         itemDiv.querySelector('.inpage-reset-single')?.addEventListener('click', async function() {
           const modelToReset = this.getAttribute('data-model'); // Raw full name
           if (modelToReset && confirm(`Reset count for ${modelToReset}?`)) { // Use raw name
@@ -1235,79 +1845,216 @@ function setupMessageListeners() {
 function setupVisibilityChangeDetection() {
   document.addEventListener('visibilitychange', function() {
     if (document.visibilityState === 'visible') {
-      console.log('ModelMeter: Document became visible, refreshing data');
+      console.log('ModelMeter: Document became visible, refreshing data and checking connection');
+      
+      // First, perform a health check to ensure extension is still working
+      performHealthCheck().catch(error => {
+        console.error('ModelMeter: Health check failed on tab focus:', error);
+        // If health check fails, the performHealthCheck function will handle showing the reload message
+      });
+      
+      // Update current model and UI
       detectCurrentModel();
       updateUI();
       
       // Check for rate limit banners and expired models when tab becomes visible
       checkAndParseRateLimitBanner();
       checkAndResetExpiredModels();
+      
+      // Also verify connection to background script with a simple ping
+      safeSendMessage({ action: 'ping' }, { suppressErrors: true }).then(response => {
+        if (!response) {
+          console.warn('ModelMeter: Failed to ping background script on tab focus');
+          showReloadPageMessage('ModelMeter lost connection to background script. Please refresh the page to restore functionality.');
+        } else {
+          console.log('ModelMeter: Successfully pinged background script on tab focus');
+        }
+      }).catch(error => {
+        console.error('ModelMeter: Error pinging background script on tab focus:', error);
+        showReloadPageMessage('ModelMeter connection error on tab focus. Please refresh the page to restore functionality.');
+      });
     }
   });
   
-  console.log('ModelMeter: Visibility change detection set up');
+  console.log('ModelMeter: Visibility change detection set up with health checks');
 }
 
 // Update the UI bubble with raw model name AND ITS COUNT
 async function updateUI() { // Bubble UI
-  if (!uiInitialized || !bubbleElement) return;
-  
-  // Display raw currentModel or '??' if null
-  const displayName = currentModel || '??';
-  let count = 0;
+  try {
+    if (!uiInitialized || !bubbleElement) {
+      console.log('ModelMeter Content: UI not initialized yet, skipping update');
+      return;
+    }
+    
+    // Check if document is still valid
+    if (!document || !document.body || !document.body.contains(bubbleElement)) {
+      console.log('ModelMeter Content: Document structure changed, bubble element no longer in DOM');
+      return;
+    }
+    
+    // Always detect current model first (this doesn't require background communication)
+    detectCurrentModel();
+    
+    // Display raw currentModel or '??' if null
+    const displayName = currentModel || '??';
+    let count = '?';
 
-  if (currentModel) { // currentModel is the raw name/slug
-    try {
+    if (currentModel) { // currentModel is the raw name/slug
       console.log(`ModelMeter Content: Getting count for raw model: ${currentModel}`);
-      const response = await chrome.runtime.sendMessage({ action: 'getModelCount', modelFullName: currentModel });
-      if (response && response.status === 'success') {
-        count = response.count;
-      } else {
-        console.error('ModelMeter Content: Failed to get model count from background for', currentModel, response);
-      }
-    } catch (error) {
-      console.error('ModelMeter Content: Error fetching model count for', currentModel, error);
-      if (error.message && error.message.includes('Extension context invalidated')) {
-        handleExtensionContextError('updateUI');
-        return; // Don't update the bubble if we have a context error
+      
+      try {
+        const response = await safeSendMessage({ 
+          action: 'getModelCount', 
+          modelFullName: currentModel 
+        }, { suppressErrors: true });
+        
+        if (response && response.status === 'success') {
+          count = response.count;
+          console.log(`ModelMeter Content: Successfully got count ${count} for ${currentModel}`);
+        } else {
+          console.warn('ModelMeter Content: Failed to get model count from background for', currentModel, 'Response:', response);
+          count = '?'; // Show ? when background fails
+        }
+      } catch (error) {
+        console.error('ModelMeter Content: Error getting model count:', error);
+        count = '?'; // Show ? when there's an error
       }
     }
-  }
-  
-  try {
-    // Only update if the element still exists and we haven't been invalidated
+    
+    // Final safety check before DOM update
     if (bubbleElement && document.body.contains(bubbleElement)) {
-      bubbleElement.textContent = `${displayName} · ${count}`;
+      const bubbleText = `${displayName} · ${count}`;
+      bubbleElement.textContent = bubbleText;
+      console.log(`ModelMeter Content: Updated bubble to "${bubbleText}"`);
+      
+      // Change bubble color based on communication status
+      if (count === '?') {
+        // Red background when communication fails
+        bubbleElement.style.backgroundColor = '#dc2626';
+        bubbleElement.style.borderColor = '#fca5a5';
+      } else {
+        // Normal blue background when working
+        bubbleElement.style.backgroundColor = '#0078D7';
+        bubbleElement.style.borderColor = 'white';
+      }
+    } else {
+      console.log('ModelMeter Content: Bubble element no longer in DOM, cannot update');
     }
   } catch (error) {
-    console.error('ModelMeter Content: Error updating bubble text:', error);
+    console.error('ModelMeter Content: Error in updateUI function:', error);
+    
+    // Even if there's an error, try to show current model without count
+    if (bubbleElement && document.body.contains(bubbleElement)) {
+      const displayName = currentModel || '??';
+      bubbleElement.textContent = `${displayName} · ?`;
+      bubbleElement.style.backgroundColor = '#dc2626'; // Red for error state
+    }
   }
 }
 
 // At around line 45, add this function to handle extension context errors
 function handleExtensionContextError(source) {
-    console.error(`ModelMeter Content: Extension context invalidated during ${source}. Refresh needed.`);
-    const errorMessage = document.createElement('div');
-    errorMessage.style.cssText = `
-        position: fixed;
-        top: 20px;
-        right: 20px;
-        background: #ff4444;
-        color: white;
-        padding: 15px;
-        border-radius: 8px;
-        z-index: 10000;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.2);
-        font-family: system-ui;
-        max-width: 300px;
+  console.error(`ModelMeter Content: Extension context invalidated during ${source}. Refresh needed.`);
+  
+  try {
+    // Safety check - don't try to manipulate DOM if document.body doesn't exist
+    if (!document || !document.body) {
+      console.log('ModelMeter Content: document.body not available, cannot display error message');
+      return;
+    }
+    
+    // Remove any existing error messages to avoid duplicates
+    const existingMessages = document.querySelectorAll('.modelmeter-error-message');
+    existingMessages.forEach(msg => {
+      try {
+        msg.remove();
+      } catch (e) {
+        // Silently ignore removal errors
+      }
+    });
+    
+    // Create a new error message
+    const errorDiv = document.createElement('div');
+    errorDiv.className = 'modelmeter-error-message';
+    errorDiv.style.cssText = `
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      background-color: #fee2e2;
+      color: #b91c1c;
+      border: 1px solid #f87171;
+      border-radius: 4px;
+      padding: 10px;
+      z-index: 10000;
+      font-family: sans-serif;
+      font-size: 14px;
+      max-width: 300px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     `;
-    errorMessage.innerHTML = `
-        <strong>ModelMeter Extension Error</strong><br>
-        Please refresh the page to restore functionality.<br>
-        <small>The extension needs to reconnect to track model usage.</small>
+    
+    // Create close button
+    const closeButton = document.createElement('button');
+    closeButton.textContent = '×';
+    closeButton.style.cssText = `
+      position: absolute;
+      top: 5px;
+      right: 5px;
+      border: none;
+      background: none;
+      color: #b91c1c;
+      font-size: 18px;
+      cursor: pointer;
+      padding: 0;
+      margin: 0;
+      width: 20px;
+      height: 20px;
+      line-height: 20px;
+      text-align: center;
     `;
-    document.body.appendChild(errorMessage);
-    setTimeout(() => errorMessage.remove(), 10000);
+    closeButton.onclick = function() {
+      try {
+        errorDiv.remove();
+      } catch (e) {
+        // Silently ignore removal errors
+      }
+    };
+    
+    // Message content
+    const messageP = document.createElement('p');
+    messageP.textContent = 'ModelMeter extension context invalidated. Please refresh the page to restore functionality.';
+    messageP.style.margin = '0 0 10px 0';
+    
+    // Refresh button
+    const refreshButton = document.createElement('button');
+    refreshButton.textContent = 'Refresh Page';
+    refreshButton.style.cssText = `
+      background-color: #dc2626;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      padding: 5px 10px;
+      cursor: pointer;
+      font-size: 14px;
+    `;
+    refreshButton.onclick = function() {
+      window.location.reload();
+    };
+    
+    // Build and append the error message
+    errorDiv.appendChild(closeButton);
+    errorDiv.appendChild(messageP);
+    errorDiv.appendChild(refreshButton);
+    
+    // Try to append to document body with error handling
+    try {
+      document.body.appendChild(errorDiv);
+    } catch (error) {
+      console.error('ModelMeter Content: Failed to append error message to document.body', error);
+    }
+  } catch (error) {
+    console.error('ModelMeter Content: Error creating error message UI', error);
+  }
 }
 
 // Add missing click handler to close panel when clicking outside
@@ -1322,8 +2069,19 @@ function setupOutsideClickHandler() {
                 inPagePanel.style.display = 'none';
             }
         }
+        
+        // Close config modal when clicking outside
+        const configModal = document.getElementById('modelmeter-config-modal');
+        if (configModal && configModal.style.display === 'flex') {
+            // Check if the click was outside the modal content
+            const modalContent = configModal.querySelector('.config-modal-content');
+            if (modalContent && !modalContent.contains(event.target)) {
+                console.log('ModelMeter Content: Click outside config modal detected, hiding modal');
+                configModal.style.display = 'none';
+            }
+        }
     });
-    console.log('ModelMeter Content: Outside click handler set up for panel');
+    console.log('ModelMeter Content: Outside click handler set up for panel and config modal');
 }
 
 // --- NEW: Styles for Plan Labels ---
@@ -1765,144 +2523,275 @@ function normalizeModelName(rawModelName) {
 
 // --- Function to check and reset expired model counters ---
 async function checkAndResetExpiredModels() {
-  console.log('ModelMeter Debug: Checking for models with expired reset times...');
+  const now = new Date();
+  const nowTimestamp = now.getTime();
+  console.log(`ModelMeter Debug (Expiration Check): 🕐 Starting expiration check at ${now.toISOString()} (${nowTimestamp})`);
+  
+  // Check extension context validity with retries
+  let pingResponse = null;
+  let retries = 3;
+  
+  while (retries > 0 && !pingResponse) {
+    pingResponse = await safeSendMessage({ action: 'ping' }, { suppressErrors: true });
+    if (!pingResponse) {
+      retries--;
+      console.log(`ModelMeter Debug (Expiration Check): ⚠️ Ping failed, ${retries} retries left`);
+      if (retries > 0) {
+        await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second before retry
+      }
+    }
+  }
+  
+  if (!pingResponse) {
+    console.log('ModelMeter Debug (Expiration Check): ❌ Extension context invalid after retries, skipping expired model check');
+    showReloadPageMessage('ModelMeter background script not responding. Expiration checks suspended. Please refresh the page.');
+    return;
+  }
+  
+  console.log('ModelMeter Debug (Expiration Check): ✅ Background script responding, proceeding with expiration check');
+  
   try {
-    // Get current model data from storage
-    const response = await chrome.runtime.sendMessage({ action: 'getModelData' });
+    // Get current model data from storage with retries
+    let response = null;
+    retries = 3;
+    
+    while (retries > 0 && !response) {
+      response = await safeSendMessage({ action: 'getModelData' }, { suppressErrors: true });
+      if (!response || response.status !== 'success' || !response.data) {
+        retries--;
+        console.log(`ModelMeter Debug (Expiration Check): ⚠️ Model data fetch failed, ${retries} retries left`);
+        if (retries > 0) {
+          await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second before retry
+        }
+      }
+    }
+    
     if (!response || response.status !== 'success' || !response.data) {
-      console.error('ModelMeter Debug: Failed to get model data for reset check');
+      console.log('ModelMeter Debug (Expiration Check): ❌ Failed to get model data after retries');
+      showReloadPageMessage('ModelMeter cannot access model data. Please refresh the page to restore functionality.');
       return;
     }
 
     const modelData = response.data;
-    const now = new Date().getTime();
     let resetsPerformed = 0;
+    let modelsToReset = [];
 
-    // Check each model to see if its reset time has passed
+    console.log(`ModelMeter Debug (Expiration Check): 📊 Checking ${Object.keys(modelData).length} models for expiration`);
+
+    // First identify all models that need reset with detailed logging
     for (const [modelName, modelInfo] of Object.entries(modelData)) {
-      // Check either nextResetTime or limitResetTime property
+      // Check both possible property names and validate they are valid timestamps
       const nextResetTime = modelInfo.nextResetTime || modelInfo.limitResetTime;
       
-      if (nextResetTime && now >= nextResetTime) {
-        console.log(`ModelMeter Debug: Reset time passed for ${modelName}, resetting counter. Reset time was: ${new Date(nextResetTime).toLocaleString()}`);
+      if (nextResetTime) {
+        // Validate that nextResetTime is a valid number
+        const resetTimestamp = typeof nextResetTime === 'number' ? nextResetTime : parseInt(nextResetTime, 10);
         
-        // Reset counter for this model and calculate new reset time
-        try {
-          // Get model limit info to calculate the next reset time
-          const planResponse = await chrome.runtime.sendMessage({ action: 'getUserPlan' });
-          const currentPlan = (planResponse && planResponse.status === 'success') ? planResponse.plan : 'FREE';
-          
-          let modelLimits = {};
-          if (currentPlan === 'FREE') {
-            modelLimits = {
-              'gpt-4o': { count: 15, periodAmount: 3, periodUnit: 'hour', displayText: '~15 per 3h' },
-              'gpt-4o-mini': { count: Infinity, periodAmount: 0, periodUnit: 'unlimited', displayText: 'Unlimited' },
-              'o3-mini': { count: 0, periodAmount: 0, periodUnit: 'none', displayText: '0' },
-              'o4-mini': { count: 20, periodAmount: 5, periodUnit: 'hour', displayText: '~20 per 5h' },
-              'o4-mini-high': { count: 0, periodAmount: 0, periodUnit: 'none', displayText: '0' },
-              'deep-research-lite': { count: 5, periodAmount: 1, periodUnit: 'month', displayText: '5 per month' },
-              'dall-e-3': { count: 3, periodAmount: 1, periodUnit: 'day', displayText: '3 per day' }
-            };
-          } else if (currentPlan === 'PLUS') {
-            modelLimits = {
-              'gpt-4': { count: 40, periodAmount: 3, periodUnit: 'hour', displayText: '40 per 3h' },
-              'gpt-4o': { count: 80, periodAmount: 3, periodUnit: 'hour', displayText: '80 per 3h' },
-              'o3': { count: 50, periodAmount: 1, periodUnit: 'week', displayText: '50 per week' },
-              'o3-mini': { count: 50, periodAmount: 1, periodUnit: 'week', displayText: '50 per week' },
-              'o4-mini': { count: 150, periodAmount: 1, periodUnit: 'day', displayText: '150 per day' },
-              'o4-mini-high': { count: 50, periodAmount: 1, periodUnit: 'day', displayText: '50 per day' },
-              'deep-research': { count: 10, periodAmount: 1, periodUnit: 'month', displayText: '10 per month' },
-              'dall-e-3': { count: 40, periodAmount: 3, periodUnit: 'hour', displayText: '40 per 3h' }
-            };
-          }
-          
-          // Find the limit object for this model
-          const modelLowerCase = modelName.toLowerCase();
-          let limitObject = null;
-          
-          // Try to find by model name
-          if (modelLimits[modelName]) {
-            limitObject = modelLimits[modelName];
-          } else if (modelLimits[modelLowerCase]) {
-            limitObject = modelLimits[modelLowerCase];
+        if (isNaN(resetTimestamp) || resetTimestamp <= 0) {
+          console.log(`ModelMeter Debug (Expiration Check): ⚠️ Model "${modelName}" has invalid reset timestamp: ${nextResetTime} - skipping`);
+          continue;
+        }
+        
+        const resetDate = new Date(resetTimestamp);
+        
+        // Validate the resulting date is valid
+        if (isNaN(resetDate.getTime())) {
+          console.log(`ModelMeter Debug (Expiration Check): ⚠️ Model "${modelName}" reset timestamp creates invalid date: ${resetTimestamp} - skipping`);
+          continue;
+        }
+        
+        const timeDiffMs = nowTimestamp - resetTimestamp;
+        const timeDiffMinutes = Math.round(timeDiffMs / (1000 * 60));
+        const timeUntilResetMs = resetTimestamp - nowTimestamp;
+        const timeUntilResetMinutes = Math.round(timeUntilResetMs / (1000 * 60));
+        
+        console.log(`ModelMeter Debug (Expiration Check): 🔍 Model "${modelName}":
+          - Current time: ${now.toISOString()} (${nowTimestamp})
+          - Reset time: ${resetDate.toISOString()} (${resetTimestamp})
+          - Time since reset: ${timeDiffMs}ms (${timeDiffMinutes} minutes)
+          - Time until reset: ${timeUntilResetMs}ms (${timeUntilResetMinutes} minutes)
+          - Is expired: ${nowTimestamp > resetTimestamp ? 'YES' : 'NO'}`);
+        
+        // Use strict greater than comparison - if current time is past reset time, it's expired
+        if (nowTimestamp > resetTimestamp) {
+          console.log(`ModelMeter Debug (Expiration Check): ⏰ Model "${modelName}" has expired by ${timeDiffMinutes} minutes! Adding to reset queue.`);
+          modelsToReset.push(modelName);
+        } else {
+          console.log(`ModelMeter Debug (Expiration Check): ✅ Model "${modelName}" is still valid for ${Math.abs(timeUntilResetMinutes)} more minutes.`);
+        }
+      } else {
+        console.log(`ModelMeter Debug (Expiration Check): ⚠️ Model "${modelName}" has no reset time set - skipping`);
+      }
+    }
+    
+    if (modelsToReset.length === 0) {
+      console.log('ModelMeter Debug (Expiration Check): ✅ No models need to be reset at this time');
+      return;
+    }
+
+    console.log(`ModelMeter Debug (Expiration Check): 🎯 Found ${modelsToReset.length} models to reset: [${modelsToReset.join(', ')}]`);
+
+    // Get user plan information once for all resets
+    let currentPlan = 'FREE';
+    const planResponse = await safeSendMessage({ action: 'getUserPlan' }, { suppressErrors: true });
+    if (planResponse && planResponse.status === 'success') {
+      currentPlan = planResponse.plan;
+      console.log(`ModelMeter Debug (Expiration Check): 📋 User plan: ${currentPlan}`);
     } else {
-            // Try to find by partial match
-            const matchingKey = Object.keys(modelLimits).find(key => 
-              modelLowerCase.includes(key.toLowerCase()) || key.toLowerCase().includes(modelLowerCase)
-            );
-            if (matchingKey) {
-              limitObject = modelLimits[matchingKey];
-            }
-          }
-          
-          // Get current timestamp to use as the "Since" timestamp
-          const resetTimestamp = now;
-          
-          // Calculate the next reset time based on current time (not the expired reset time)
-          let calculatedNextResetTime = null;
-          if (limitObject && limitObject.periodUnit !== 'unlimited' && limitObject.periodUnit !== 'none') {
-            // Always calculate from now, since the previous reset time has expired
-            let newResetDate = new Date(now);
-            
-            // Calculate next reset time based on period
-            switch(limitObject.periodUnit) {
-              case 'hour':
-                newResetDate.setHours(newResetDate.getHours() + limitObject.periodAmount);
-                break;
-              case 'day':
-                newResetDate.setDate(newResetDate.getDate() + limitObject.periodAmount);
-                break;
-              case 'week':
-                newResetDate.setDate(newResetDate.getDate() + (limitObject.periodAmount * 7));
-                break;
-              case 'month':
-                newResetDate.setMonth(newResetDate.getMonth() + limitObject.periodAmount);
-                break;
-              default:
-                // Default to 3 hours if we can't determine
-                newResetDate.setHours(newResetDate.getHours() + 3);
-                break;
-            }
-            
-            calculatedNextResetTime = newResetDate.getTime();
-            console.log(`ModelMeter Debug: New reset time for ${modelName}: ${new Date(calculatedNextResetTime).toISOString()} (${limitObject.periodAmount} ${limitObject.periodUnit}(s) from now)`);
-          }
-          
-          // Reset the counter and update both timestamps
-          // Set both nextResetTime and limitResetTime for compatibility
-          const resetResponse = await chrome.runtime.sendMessage({
-            action: 'resetSingleModelCounter',
-            modelFullName: modelName,
-            resetTimestamp: resetTimestamp,           // Current time as "Since" timestamp
-            nextResetTime: calculatedNextResetTime,   // Calculated "Until" timestamp
-            limitResetTime: calculatedNextResetTime   // Also set limitResetTime for compatibility
-          });
-          
-          if (resetResponse && resetResponse.status === 'success') {
-            resetsPerformed++;
-            console.log(`ModelMeter Debug: Successfully reset counter for ${modelName}, next reset at ${calculatedNextResetTime ? new Date(calculatedNextResetTime).toISOString() : 'not set'}`);
-  } else {
-            console.error(`ModelMeter Debug: Failed to reset counter for ${modelName}`);
-          }
-        } catch (error) {
-          console.error(`ModelMeter Debug: Error resetting counter for ${modelName}:`, error);
-          if (error.message && error.message.includes('Extension context invalidated')) {
-            handleExtensionContextError('resetExpiredModels');
+      console.log(`ModelMeter Debug (Expiration Check): ⚠️ Failed to get user plan, defaulting to FREE`);
+    }
+    
+    // Define model limits based on plan
+    let modelLimits = {};
+    if (currentPlan === 'FREE') {
+      modelLimits = {
+        'gpt-4o': { count: 15, periodAmount: 3, periodUnit: 'hour', displayText: '~15 per 3h' },
+        'gpt-4o-mini': { count: Infinity, periodAmount: 0, periodUnit: 'unlimited', displayText: 'Unlimited' },
+        'o3-mini': { count: 0, periodAmount: 0, periodUnit: 'none', displayText: '0' },
+        'o4-mini': { count: 20, periodAmount: 5, periodUnit: 'hour', displayText: '~20 per 5h' },
+        'o4-mini-high': { count: 0, periodAmount: 0, periodUnit: 'none', displayText: '0' },
+        'deep-research-lite': { count: 5, periodAmount: 1, periodUnit: 'month', displayText: '5 per month' },
+        'dall-e-3': { count: 3, periodAmount: 1, periodUnit: 'day', displayText: '3 per day' }
+      };
+    } else if (currentPlan === 'PLUS') {
+      modelLimits = {
+        'gpt-4': { count: 40, periodAmount: 3, periodUnit: 'hour', displayText: '40 per 3h' },
+        'gpt-4o': { count: 80, periodAmount: 3, periodUnit: 'hour', displayText: '80 per 3h' },
+        'o3': { count: 50, periodAmount: 1, periodUnit: 'week', displayText: '50 per week' },
+        'o3-mini': { count: 50, periodAmount: 1, periodUnit: 'week', displayText: '50 per week' },
+        'o4-mini': { count: 150, periodAmount: 1, periodUnit: 'day', displayText: '150 per day' },
+        'o4-mini-high': { count: 50, periodAmount: 1, periodUnit: 'day', displayText: '50 per day' },
+        'deep-research': { count: 10, periodAmount: 1, periodUnit: 'month', displayText: '10 per month' },
+        'dall-e-3': { count: 40, periodAmount: 3, periodUnit: 'hour', displayText: '40 per 3h' }
+      };
+    }
+
+    // Now process each model that needs reset - one at a time with error handling
+    for (const modelName of modelsToReset) {
+      console.log(`ModelMeter Debug (Expiration Check): 🔧 Processing reset for "${modelName}"`);
+      
+      // Find the limit object for this model
+      const modelLowerCase = modelName.toLowerCase();
+      let limitObject = null;
+      
+      // Try to find by model name
+      if (modelLimits[modelName]) {
+        limitObject = modelLimits[modelName];
+        console.log(`ModelMeter Debug (Expiration Check): ✅ Found limit by exact match for "${modelName}"`);
+      } else if (modelLimits[modelLowerCase]) {
+        limitObject = modelLimits[modelLowerCase];
+        console.log(`ModelMeter Debug (Expiration Check): ✅ Found limit by lowercase match for "${modelName}"`);
+      } else {
+        // Try to find by partial match
+        const matchingKey = Object.keys(modelLimits).find(key => 
+          modelLowerCase.includes(key.toLowerCase()) || key.toLowerCase().includes(modelLowerCase)
+        );
+        if (matchingKey) {
+          limitObject = modelLimits[matchingKey];
+          console.log(`ModelMeter Debug (Expiration Check): ✅ Found limit by partial match for "${modelName}" -> "${matchingKey}"`);
+        } else {
+          console.log(`ModelMeter Debug (Expiration Check): ⚠️ No limit object found for "${modelName}"`);
+        }
+      }
+      
+      // Use current time as the new "Since" timestamp
+      const newSinceTimestamp = nowTimestamp;
+      
+      // Calculate the next reset time based on current time plus the period
+      let newUntilTimestamp = null;
+      if (limitObject && limitObject.periodUnit !== 'unlimited' && limitObject.periodUnit !== 'none') {
+        const newResetDate = new Date(nowTimestamp);
+        
+        // Calculate next reset time based on period
+        switch(limitObject.periodUnit) {
+          case 'hour':
+            newResetDate.setHours(newResetDate.getHours() + limitObject.periodAmount);
+            break;
+          case 'day':
+            newResetDate.setDate(newResetDate.getDate() + limitObject.periodAmount);
+            break;
+          case 'week':
+            newResetDate.setDate(newResetDate.getDate() + (limitObject.periodAmount * 7));
+            break;
+          case 'month':
+            newResetDate.setMonth(newResetDate.getMonth() + limitObject.periodAmount);
+            break;
+          default:
+            // Default to 3 hours if we can't determine
+            newResetDate.setHours(newResetDate.getHours() + 3);
+            console.log(`ModelMeter Debug (Expiration Check): ⚠️ Unknown period unit "${limitObject.periodUnit}" for "${modelName}", defaulting to 3 hours`);
+            break;
+        }
+        
+        newUntilTimestamp = newResetDate.getTime();
+        
+        // Validate the calculated timestamp
+        if (isNaN(newUntilTimestamp) || newUntilTimestamp <= nowTimestamp) {
+          console.error(`ModelMeter Debug (Expiration Check): ❌ Invalid calculated reset time for "${modelName}": ${newUntilTimestamp}`);
+          // Fallback to 3 hours from now
+          const fallbackDate = new Date(nowTimestamp);
+          fallbackDate.setHours(fallbackDate.getHours() + 3);
+          newUntilTimestamp = fallbackDate.getTime();
+          console.log(`ModelMeter Debug (Expiration Check): 🔧 Using fallback reset time for "${modelName}": ${new Date(newUntilTimestamp).toISOString()}`);
+        } else {
+          console.log(`ModelMeter Debug (Expiration Check): 📅 Calculated new reset time for "${modelName}": ${new Date(newUntilTimestamp).toISOString()} (${limitObject.periodAmount} ${limitObject.periodUnit}(s) from now)`);
+        }
+      } else {
+        console.log(`ModelMeter Debug (Expiration Check): ⚠️ Model "${modelName}" has no period or is unlimited/none - no next reset time calculated`);
+      }
+      
+      console.log(`ModelMeter Debug (Expiration Check): 📤 Sending reset request for "${modelName}" to background script...`);
+      
+      // Reset the counter and update both timestamps with retries
+      let resetResponse = null;
+      let resetRetries = 3;
+      
+      while (resetRetries > 0 && (!resetResponse || resetResponse.status !== 'success')) {
+        resetResponse = await safeSendMessage({
+          action: 'resetSingleModelCounter',
+          modelFullName: modelName,
+          resetTimestamp: newSinceTimestamp,        // Current time as "Since" timestamp
+          nextResetTime: newUntilTimestamp,         // Calculated "Until" timestamp
+          limitResetTime: newUntilTimestamp         // Also set limitResetTime for compatibility
+        }, { suppressErrors: true }); // Use suppressErrors for retry logic
+        
+        if (!resetResponse || resetResponse.status !== 'success') {
+          resetRetries--;
+          console.log(`ModelMeter Debug (Expiration Check): ⚠️ Reset failed for "${modelName}", ${resetRetries} retries left. Response:`, resetResponse);
+          if (resetRetries > 0) {
+            await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second before retry
           }
         }
+      }
+      
+      if (resetResponse && resetResponse.status === 'success') {
+        resetsPerformed++;
+        console.log(`ModelMeter Debug (Expiration Check): ✅ Successfully reset counter for "${modelName}"
+          - New since time: ${new Date(newSinceTimestamp).toISOString()}
+          - New until time: ${newUntilTimestamp ? new Date(newUntilTimestamp).toISOString() : 'not set'}
+          - Counter reset to: 0`);
+      } else {
+        console.error(`ModelMeter Debug (Expiration Check): ❌ Failed to reset counter for "${modelName}" after all retries. Final response:`, resetResponse);
       }
     }
     
     // If any models were reset, update the UI
     if (resetsPerformed > 0) {
-      console.log(`ModelMeter Debug: Reset ${resetsPerformed} model counters, updating UI`);
-      updateUI();
+      console.log(`ModelMeter Debug (Expiration Check): 🔄 Reset ${resetsPerformed} model counters, updating UI`);
+      updateUI().catch(error => {
+        console.error('ModelMeter Debug (Expiration Check): Error updating UI after resets:', error);
+      });
+      
       if (inPagePanel && inPagePanel.style.display === 'block') {
-        updateInPagePanelData();
+        updateInPagePanelData().catch(error => {
+          console.error('ModelMeter Debug (Expiration Check): Error updating panel after resets:', error);
+        });
       }
     }
+    
+    console.log(`ModelMeter Debug (Expiration Check): ✅ Expiration check completed. Reset ${resetsPerformed} of ${modelsToReset.length} models.`);
   } catch (error) {
-    console.error('ModelMeter Debug: Error checking for expired models:', error);
+    console.error('ModelMeter Debug (Expiration Check): ❌ Error checking for expired models:', error);
     if (error.message && error.message.includes('Extension context invalidated')) {
       handleExtensionContextError('checkAndResetExpiredModels');
     }

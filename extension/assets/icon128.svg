@@ -1,0 +1,7 @@
+<svg width="128" height="128" xmlns="http://www.w3.org/2000/svg">
+  <rect width="128" height="128" rx="20" fill="#282c34"/>
+  <text x="64" y="40" font-family="Arial" font-size="28" fill="#61dafb" font-weight="bold" text-anchor="middle">GPT</text>
+  <text x="64" y="78" font-family="Arial" font-size="52" fill="#ffffff" font-weight="bold" text-anchor="middle">#</text>
+  <circle cx="96" cy="96" r="24" fill="#61dafb"/>
+  <text x="96" y="105" font-family="Arial" font-size="28" fill="#282c34" font-weight="bold" text-anchor="middle">∞</text>
+</svg>
