@@ -419,10 +419,29 @@ async function performHealthCheck() {
     }
     
     // Check if UI elements are still present and functional
-    if (isModelMeterInitialized && !bubbleElement) {
-      console.warn('ModelMeter Content: Health check failed - bubble element missing');
-      showReloadPageMessage('ModelMeter UI elements are missing. Please refresh the page to restore functionality.');
-      return;
+    if (isModelMeterInitialized && (!bubbleElement || !document.body.contains(bubbleElement))) {
+      console.warn('ModelMeter Content: Health check failed - bubble element missing or removed from DOM');
+      console.log('ModelMeter Content: Attempting to recreate bubble element...');
+      
+      // Try to recreate the bubble element
+      try {
+        createBubbleUI();
+        if (bubbleElement && document.body.contains(bubbleElement)) {
+          console.log('ModelMeter Content: Successfully recreated bubble element');
+          // Update UI after recreation
+          updateUI().catch(error => {
+            console.error('ModelMeter Content: Error updating UI after bubble recreation:', error);
+          });
+        } else {
+          console.warn('ModelMeter Content: Failed to recreate bubble element');
+          showReloadPageMessage('ModelMeter UI elements keep disappearing. Please refresh the page to restore functionality.');
+          return;
+        }
+      } catch (error) {
+        console.error('ModelMeter Content: Error recreating bubble element:', error);
+        showReloadPageMessage('ModelMeter UI elements are missing and cannot be recreated. Please refresh the page to restore functionality.');
+        return;
+      }
     }
     
     // Check if we can still access extension resources
@@ -857,42 +876,115 @@ function createTestElement() {
 
 // Create the bubble
 function createBubbleUI() {
-  if (document.getElementById('modelmeter-bubble')) return;
+  // Clean up any existing bubble elements first
+  const existingBubble = document.getElementById('modelmeter-bubble');
+  if (existingBubble) {
+    console.log('ModelMeter Content: Removing existing bubble element');
+    existingBubble.remove();
+  }
 
+  // Clear the global reference if it's stale
+  if (bubbleElement && !document.body.contains(bubbleElement)) {
+    console.log('ModelMeter Content: Clearing stale bubble element reference');
+    bubbleElement = null;
+  }
+
+  try {
     bubbleElement = document.createElement('div');
     bubbleElement.id = 'modelmeter-bubble';
-  bubbleElement.textContent = 'ModelMeter'; // Will be updated by updateUI
+    bubbleElement.textContent = 'ModelMeter'; // Will be updated by updateUI
     bubbleElement.style.cssText = `
-    position: fixed; bottom: 80px; right: 20px; padding: 10px 15px;
-    background-color: #0078D7; color: white; border-radius: 20px;
-    font-family: system-ui, sans-serif; font-weight: bold; font-size: 14px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3); z-index: 2147483646;
-    cursor: pointer; border: 2px solid white;
-  `;
-  // Add a double-click handler for testing API interception
-  bubbleElement.addEventListener('dblclick', () => {
-    testApiInterception();
-  });
-  document.body.appendChild(bubbleElement);
-  panelToggleButton = bubbleElement;
+      position: fixed !important; 
+      bottom: 80px !important; 
+      right: 20px !important; 
+      padding: 10px 15px !important;
+      background-color: #0078D7 !important; 
+      color: white !important; 
+      border-radius: 20px !important;
+      font-family: system-ui, sans-serif !important; 
+      font-weight: bold !important; 
+      font-size: 14px !important;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3) !important; 
+      z-index: 2147483646 !important;
+      cursor: pointer !important; 
+      border: 2px solid white !important;
+      display: block !important;
+      visibility: visible !important;
+      pointer-events: auto !important;
+    `;
+    
+    // Add a data attribute to help identify our element
+    bubbleElement.setAttribute('data-modelmeter-element', 'true');
+    
+    // Add a double-click handler for testing API interception
+    bubbleElement.addEventListener('dblclick', () => {
+      testApiInterception();
+    });
+    
+         // Add click handler for panel toggle
+     bubbleElement.addEventListener('click', () => {
+       console.log('ModelMeter Content: Bubble clicked');
+       
+       // Ensure panel exists, create it if it doesn't
+       if (!inPagePanel || !document.body.contains(inPagePanel)) {
+         console.log('ModelMeter Content: Panel missing, creating it...');
+         createInPageUI();
+       }
+       
+       if (inPagePanel) {
+         const isVisible = inPagePanel.style.display === 'block';
+         inPagePanel.style.display = isVisible ? 'none' : 'block';
+         console.log(`ModelMeter Content: Panel ${isVisible ? 'hidden' : 'shown'}`);
+         if (!isVisible) {
+           updateInPagePanelData();
+         }
+       } else {
+         console.error('ModelMeter Content: Failed to create or access panel');
+       }
+     });
 
-  panelToggleButton.addEventListener('click', () => {
-    if (inPagePanel) {
-      const  isVisible = inPagePanel.style.display === 'block';
-      inPagePanel.style.display = isVisible ? 'none' : 'block';
-      if (!isVisible) {
-        updateInPagePanelData();
-      }
+    // Ensure document.body exists before appending
+    if (!document.body) {
+      console.error('ModelMeter Content: document.body not available for bubble creation');
+      return;
     }
-  });
-  uiInitialized = true;
-  updateUI();
-  console.log('ModelMeter Content: Bubble UI created');
+
+    document.body.appendChild(bubbleElement);
+    panelToggleButton = bubbleElement;
+    uiInitialized = true;
+    
+    // Set up a MutationObserver to detect if the bubble gets removed
+    setupBubbleProtection();
+    
+    updateUI();
+    console.log('ModelMeter Content: Bubble UI created successfully');
+  } catch (error) {
+    console.error('ModelMeter Content: Error creating bubble UI:', error);
+    bubbleElement = null;
+    uiInitialized = false;
+  }
 }
 
 // Create the In-Page UI Panel
 function createInPageUI() {
-  if (document.getElementById('modelmeter-inpage-panel')) return;
+  // Clean up any existing panel elements first
+  const existingPanel = document.getElementById('modelmeter-inpage-panel');
+  if (existingPanel) {
+    console.log('ModelMeter Content: Removing existing panel element');
+    existingPanel.remove();
+  }
+
+  // Clear the global reference if it's stale
+  if (inPagePanel && !document.body.contains(inPagePanel)) {
+    console.log('ModelMeter Content: Clearing stale panel element reference');
+    inPagePanel = null;
+  }
+
+  // Ensure document.body exists before creating panel
+  if (!document.body) {
+    console.error('ModelMeter Content: document.body not available for panel creation');
+    return;
+  }
 
   inPagePanel = document.createElement('div');
   inPagePanel.id = 'modelmeter-inpage-panel';
@@ -975,7 +1067,12 @@ function createInPageUI() {
 
 // Create configuration modal for in-page usage
 function createConfigModal() {
-  if (document.getElementById('modelmeter-config-modal')) return;
+  // Clean up any existing config modal first
+  const existingModal = document.getElementById('modelmeter-config-modal');
+  if (existingModal) {
+    console.log('ModelMeter Content: Removing existing config modal');
+    existingModal.remove();
+  }
   
   const configModal = document.createElement('div');
   configModal.id = 'modelmeter-config-modal';
@@ -1076,10 +1173,17 @@ function createConfigModal() {
     hideConfigModal();
   });
   
-  document.getElementById('inpage-config-form')?.addEventListener('submit', function(event) {
-    event.preventDefault();
-    saveModelConfig();
-  });
+  const configForm = document.getElementById('inpage-config-form');
+  if (configForm) {
+    configForm.addEventListener('submit', function(event) {
+      console.log('ModelMeter Content: Config form submitted');
+      event.preventDefault();
+      saveModelConfig();
+    });
+    console.log('ModelMeter Content: Config form submit listener attached');
+  } else {
+    console.error('ModelMeter Content: Config form not found when trying to attach listener');
+  }
   
   // Add keyboard support for ESC key to close the modal
   document.addEventListener('keydown', function(event) {
@@ -1113,6 +1217,13 @@ function createConfigModal() {
 // Show the configuration modal with model data
 function showConfigModal(modelName, modelData) {
   console.log('ModelMeter Content: Opening configuration for model:', modelName, modelData);
+  
+  // Ensure the config modal exists
+  const existingConfigModal = document.getElementById('modelmeter-config-modal');
+  if (!existingConfigModal) {
+    console.error('ModelMeter Content: Config modal not found, attempting to create it');
+    createConfigModal();
+  }
   
   // Set the model name in the hidden field
   document.getElementById('inpage-config-model-name').value = modelName;
@@ -1161,11 +1272,30 @@ function hideConfigModal() {
 
 // Save the model configuration
 async function saveModelConfig() {
-  const modelName = document.getElementById('inpage-config-model-name').value;
-  const count = parseInt(document.getElementById('inpage-config-count').value);
-  const expireDate = new Date(document.getElementById('inpage-config-expire-date').value).getTime();
+  console.log('ModelMeter Content: saveModelConfig called');
+  
+  const modelNameEl = document.getElementById('inpage-config-model-name');
+  const countEl = document.getElementById('inpage-config-count');
+  const expireDateEl = document.getElementById('inpage-config-expire-date');
+  
+  if (!modelNameEl || !countEl || !expireDateEl) {
+    console.error('ModelMeter Content: Config form elements not found', {
+      modelNameEl: !!modelNameEl,
+      countEl: !!countEl,
+      expireDateEl: !!expireDateEl
+    });
+    updateStatusInPanel('Configuration form elements missing.', 'error', 'inpage-status');
+    return;
+  }
+  
+  const modelName = modelNameEl.value;
+  const count = parseInt(countEl.value);
+  const expireDate = new Date(expireDateEl.value).getTime();
+  
+  console.log('ModelMeter Content: Config values:', { modelName, count, expireDate });
   
   if (!modelName || isNaN(count) || isNaN(expireDate)) {
+    console.error('ModelMeter Content: Invalid configuration data', { modelName, count, expireDate });
     updateStatusInPanel('Invalid configuration data.', 'error', 'inpage-status');
     return;
   }
@@ -1198,10 +1328,12 @@ async function saveModelConfig() {
     });
 
     if (updateResponse && updateResponse.status === 'success') {
+      console.log('ModelMeter Content: Configuration update successful');
       updateStatusInPanel(`Configuration for ${modelName} updated.`, 'success', 'inpage-status');
       hideConfigModal();
       updateInPagePanelData();
     } else {
+      console.error('ModelMeter Content: Configuration update failed', updateResponse);
       updateStatusInPanel(`Failed to update configuration for ${modelName}.`, 'error', 'inpage-status');
     }
   } catch (error) {
@@ -1883,14 +2015,34 @@ function setupVisibilityChangeDetection() {
 async function updateUI() { // Bubble UI
   try {
     if (!uiInitialized || !bubbleElement) {
-      console.log('ModelMeter Content: UI not initialized yet, skipping update');
-      return;
+      console.log('ModelMeter Content: UI not initialized yet or bubble missing, attempting to create');
+      // Try to create bubble if it's missing
+      if (isModelMeterInitialized && document && document.body) {
+        createBubbleUI();
+        if (!bubbleElement) {
+          console.log('ModelMeter Content: Failed to create bubble, skipping update');
+          return;
+        }
+      } else {
+        console.log('ModelMeter Content: Extension not fully initialized, skipping update');
+        return;
+      }
     }
     
-    // Check if document is still valid
+    // Check if document is still valid and bubble is in DOM
     if (!document || !document.body || !document.body.contains(bubbleElement)) {
-      console.log('ModelMeter Content: Document structure changed, bubble element no longer in DOM');
-      return;
+      console.log('ModelMeter Content: Document structure changed or bubble element no longer in DOM');
+      // Try to recreate the bubble
+      if (document && document.body) {
+        console.log('ModelMeter Content: Attempting to recreate bubble for UI update');
+        createBubbleUI();
+        if (!bubbleElement || !document.body.contains(bubbleElement)) {
+          console.log('ModelMeter Content: Failed to recreate bubble for UI update');
+          return;
+        }
+      } else {
+        return;
+      }
     }
     
     // Always detect current model first (this doesn't require background communication)
@@ -2055,6 +2207,71 @@ function handleExtensionContextError(source) {
   } catch (error) {
     console.error('ModelMeter Content: Error creating error message UI', error);
   }
+}
+
+// Set up protection for bubble element to detect and recover from removal
+function setupBubbleProtection() {
+  if (!bubbleElement || typeof MutationObserver === 'undefined') {
+    return;
+  }
+
+  // Create a MutationObserver to watch for bubble removal
+  const bubbleObserver = new MutationObserver((mutations) => {
+    mutations.forEach((mutation) => {
+      if (mutation.type === 'childList') {
+        // Check if our bubble was removed
+        mutation.removedNodes.forEach((node) => {
+          if (node === bubbleElement || 
+              (node.nodeType === Node.ELEMENT_NODE && node.id === 'modelmeter-bubble')) {
+            console.warn('ModelMeter Content: Bubble element was removed from DOM by external script');
+            
+            // Clear our reference since the element is gone
+            bubbleElement = null;
+            uiInitialized = false;
+            
+                         // Recreate the bubble after a short delay
+             setTimeout(() => {
+               if (!bubbleElement || !document.body.contains(bubbleElement)) {
+                 console.log('ModelMeter Content: Recreating bubble element after removal');
+                 createBubbleUI();
+                 
+                 // Also check if panel needs recreation
+                 if (!inPagePanel || !document.body.contains(inPagePanel)) {
+                   console.log('ModelMeter Content: Also recreating panel element');
+                   createInPageUI();
+                 }
+               }
+             }, 1000);
+          }
+        });
+      }
+    });
+  });
+
+  // Observe the document body for child removals
+  bubbleObserver.observe(document.body, {
+    childList: true,
+    subtree: true
+  });
+
+  // Also set up a periodic check as a backup
+  const bubbleCheck = setInterval(() => {
+    if (bubbleElement && !document.body.contains(bubbleElement)) {
+      console.warn('ModelMeter Content: Bubble element no longer in DOM (periodic check)');
+      bubbleElement = null;
+      uiInitialized = false;
+      createBubbleUI();
+    }
+    
+    // Also check panel
+    if (inPagePanel && !document.body.contains(inPagePanel)) {
+      console.warn('ModelMeter Content: Panel element no longer in DOM (periodic check)');
+      inPagePanel = null;
+      createInPageUI();
+    }
+  }, 10000); // Check every 10 seconds
+
+  console.log('ModelMeter Content: Bubble protection set up with MutationObserver and periodic checks');
 }
 
 // Add missing click handler to close panel when clicking outside
